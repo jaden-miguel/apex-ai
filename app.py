@@ -117,6 +117,8 @@ def tc(team: str) -> str:
 _CF_TILE_CACHE = {}
 _BG_CACHE = {}
 _F1_LOGO_CACHE = {}
+_TROPHY_CACHE = {}
+_AMBIENT_CACHE = {}  # keyed by (kind, w, h, *params)
 
 
 # Official F1 brand red.  Used for the logo + key accents.
@@ -251,6 +253,426 @@ def _make_f1_logo(height: int = 40):
 
     _F1_LOGO_CACHE[height] = img
     return img
+
+
+# ---------------------------------------------------------------------------
+# Trophy artwork
+# ---------------------------------------------------------------------------
+def _make_trophy_image(height: int = 60):
+    """Render a stylised F1-style gold trophy as a PIL RGBA image.
+
+    Cached by height – the trophy is static once drawn, so re-renders are
+    free.  The result is roughly square (slightly taller than wide to fit
+    the cup + stem + base proportions of a real F1 trophy).
+
+    The trophy is painted in three gold tones (highlight, mid, shadow) so
+    it reads as a 3D object on the dark podium card rather than as a flat
+    silhouette.  An "F1" engraving on the base ties it back to the brand.
+    """
+    if not HAS_PIL:
+        return None
+    if height in _TROPHY_CACHE:
+        return _TROPHY_CACHE[height]
+
+    H = max(24, int(height))
+    W = max(20, int(H * 0.85))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Gold palette – warm broadcast-style golds, brighter than the team
+    # GOLD constant so the trophy pops off the BG_CARD background.
+    gold_hi   = (255, 232, 140, 255)
+    gold_mid  = (240, 195,  82, 255)
+    gold_dark = (170, 120,  35, 255)
+    gold_edge = (110,  72,  18, 255)
+
+    cx = W / 2.0
+
+    # ── Cup body ──
+    cup_top = int(H * 0.08)
+    cup_bot = int(H * 0.50)
+    cup_w   = int(W * 0.62)
+    draw.ellipse(
+        [cx - cup_w / 2, cup_top, cx + cup_w / 2, cup_bot],
+        fill=gold_mid, outline=gold_edge, width=1,
+    )
+    # Lip (thin band at the top of the cup)
+    lip_h = max(2, int(H * 0.05))
+    draw.ellipse(
+        [cx - cup_w / 2, cup_top - 1,
+         cx + cup_w / 2, cup_top + lip_h],
+        fill=gold_dark, outline=gold_edge, width=1,
+    )
+    # Inner well (darker oval to suggest cup depth)
+    draw.ellipse(
+        [cx - cup_w / 2 + 2, cup_top + 1,
+         cx + cup_w / 2 - 2, cup_top + lip_h - 1],
+        fill=gold_edge, outline=None,
+    )
+    # Highlight – small lighter ellipse on the upper-left curve
+    hl_x0 = cx - cup_w / 3
+    hl_y0 = cup_top + lip_h + 2
+    hl_x1 = hl_x0 + cup_w * 0.18
+    hl_y1 = hl_y0 + (cup_bot - cup_top) * 0.55
+    draw.ellipse([hl_x0, hl_y0, hl_x1, hl_y1], fill=gold_hi, outline=None)
+
+    # ── Handles (curved arcs hugging the cup) ──
+    handle_w = max(3, int(W * 0.16))
+    h_top = int(H * 0.16)
+    h_bot = int(H * 0.42)
+    # Left
+    draw.arc(
+        [cx - cup_w / 2 - handle_w + 1, h_top,
+         cx - cup_w / 2 + 4,           h_bot],
+        start=60, end=300, fill=gold_mid, width=3,
+    )
+    draw.arc(
+        [cx - cup_w / 2 - handle_w + 1, h_top,
+         cx - cup_w / 2 + 4,           h_bot],
+        start=60, end=300, fill=gold_edge, width=1,
+    )
+    # Right
+    draw.arc(
+        [cx + cup_w / 2 - 4,           h_top,
+         cx + cup_w / 2 + handle_w - 1, h_bot],
+        start=240, end=120, fill=gold_mid, width=3,
+    )
+    draw.arc(
+        [cx + cup_w / 2 - 4,           h_top,
+         cx + cup_w / 2 + handle_w - 1, h_bot],
+        start=240, end=120, fill=gold_edge, width=1,
+    )
+
+    # ── Stem (tapering bridge between cup and base) ──
+    stem_top = cup_bot - 1
+    stem_bot = int(H * 0.72)
+    stem_top_w = int(W * 0.22)
+    stem_mid_w = int(W * 0.10)
+    stem_bot_w = int(W * 0.14)
+    # Two trapezoids for a vase-like profile
+    draw.polygon([
+        (cx - stem_top_w / 2, stem_top),
+        (cx + stem_top_w / 2, stem_top),
+        (cx + stem_mid_w / 2, (stem_top + stem_bot) // 2),
+        (cx - stem_mid_w / 2, (stem_top + stem_bot) // 2),
+    ], fill=gold_mid, outline=gold_edge)
+    draw.polygon([
+        (cx - stem_mid_w / 2, (stem_top + stem_bot) // 2),
+        (cx + stem_mid_w / 2, (stem_top + stem_bot) // 2),
+        (cx + stem_bot_w / 2, stem_bot),
+        (cx - stem_bot_w / 2, stem_bot),
+    ], fill=gold_dark, outline=gold_edge)
+
+    # ── Base plaque (the engraved plinth) ──
+    base_top = stem_bot
+    base_bot = int(H * 0.94)
+    base_top_w = int(W * 0.42)
+    base_bot_w = int(W * 0.55)
+    draw.polygon([
+        (cx - base_top_w / 2, base_top),
+        (cx + base_top_w / 2, base_top),
+        (cx + base_bot_w / 2, base_bot),
+        (cx - base_bot_w / 2, base_bot),
+    ], fill=gold_dark, outline=gold_edge)
+    # Thin highlight along the top of the base for sheen
+    draw.line(
+        [(cx - base_top_w / 2 + 2, base_top + 1),
+         (cx + base_top_w / 2 - 2, base_top + 1)],
+        fill=gold_hi, width=1,
+    )
+    # "F1" engraving in F1 red on the base if we can find a bold font
+    if H >= 36:
+        try:
+            f1_font = ImageFont.truetype("arialbd.ttf", max(7, int(H * 0.11)))
+        except (OSError, IOError):
+            try:
+                f1_font = ImageFont.load_default()
+            except Exception:
+                f1_font = None
+        if f1_font is not None:
+            text = "F1"
+            try:
+                bbox = draw.textbbox((0, 0), text, font=f1_font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                tx = cx - tw / 2 - bbox[0]
+                ty = base_top + ((base_bot - base_top) - th) / 2 - bbox[1]
+            except Exception:
+                tw, th = f1_font.getsize(text) if hasattr(f1_font, "getsize") else (10, 10)
+                tx = cx - tw / 2
+                ty = base_top + ((base_bot - base_top) - th) / 2
+            draw.text((tx, ty), text, font=f1_font, fill=F1_RED_RGB + (255,))
+
+    _TROPHY_CACHE[height] = img
+    return img
+
+
+# ---------------------------------------------------------------------------
+# Ambient decoration artwork (static PIL silhouettes for per-circuit theming)
+# ---------------------------------------------------------------------------
+def _ambient_cache_get(key):
+    return _AMBIENT_CACHE.get(key)
+
+
+def _ambient_cache_put(key, img):
+    _AMBIENT_CACHE[key] = img
+    return img
+
+
+def _make_bonsai_image(height: int = 56, mirror: bool = False):
+    """Stylised bonsai silhouette – a curved trunk in a pot with three
+    leaf clusters above.  Mirror=True flips it horizontally so corners
+    on either side don't feel duplicated."""
+    if not HAS_PIL:
+        return None
+    key = ("bonsai", int(height), bool(mirror))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    H = max(20, int(height))
+    W = max(20, int(H * 1.1))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    pot_top = int(H * 0.78)
+    pot_w = int(W * 0.55)
+    # Pot (warm brown trapezoid)
+    pot = [
+        (W // 2 - pot_w // 2, pot_top),
+        (W // 2 + pot_w // 2, pot_top),
+        (W // 2 + pot_w // 2 - 3, H - 2),
+        (W // 2 - pot_w // 2 + 3, H - 2),
+    ]
+    draw.polygon(pot, fill=(78, 50, 28, 230), outline=(40, 24, 12, 255))
+    # Pot rim
+    draw.rectangle(
+        [W // 2 - pot_w // 2 - 1, pot_top - 2,
+         W // 2 + pot_w // 2 + 1, pot_top + 1],
+        fill=(58, 36, 20, 235),
+    )
+
+    # Curved trunk – two short segments forming an S
+    trunk_color = (62, 40, 22, 240)
+    tx = W // 2
+    ty = pot_top
+    p1 = (tx, ty)
+    p2 = (tx - int(W * 0.08), int(H * 0.55))
+    p3 = (tx + int(W * 0.04), int(H * 0.30))
+    draw.line([p1, p2], fill=trunk_color, width=3)
+    draw.line([p2, p3], fill=trunk_color, width=3)
+
+    # Leaf clusters – two greens for depth
+    leaf_dark = (38, 78, 44, 235)
+    leaf_mid  = (62, 122, 62, 235)
+    for (lx, ly, r) in (
+        (int(W * 0.50), int(H * 0.22), int(W * 0.20)),
+        (int(W * 0.30), int(H * 0.32), int(W * 0.15)),
+        (int(W * 0.68), int(H * 0.30), int(W * 0.16)),
+    ):
+        draw.ellipse([lx - r, ly - r * 0.6, lx + r, ly + r * 0.6],
+                     fill=leaf_dark, outline=None)
+        draw.ellipse([lx - r + 2, ly - r * 0.6 + 1,
+                      lx + r - 4, ly + r * 0.6 - 3],
+                     fill=leaf_mid, outline=None)
+
+    if mirror:
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+    return _ambient_cache_put(key, img)
+
+
+def _make_lantern_image(height: int = 26):
+    """Paper-lantern silhouette: red oval body with dark caps and a soft
+    warm glow.  Used for Japan / China circuits."""
+    if not HAS_PIL:
+        return None
+    key = ("lantern", int(height))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    H = max(12, int(height))
+    W = max(10, int(H * 0.78))
+    img = Image.new("RGBA", (W, H + 6), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Hanging cord
+    draw.line([(W // 2, 0), (W // 2, 4)], fill=(60, 30, 30, 220), width=1)
+    # Top cap
+    draw.rectangle([W * 0.30, 3, W * 0.70, 6],
+                   fill=(40, 22, 20, 255))
+    # Body (red oval) – two-tone for depth
+    body_top = 6
+    body_bot = H + 1
+    draw.ellipse([1, body_top, W - 1, body_bot],
+                 fill=(196, 32, 26, 245), outline=(110, 16, 12, 255), width=1)
+    # Vertical ribbing (4 thin lines)
+    for f in (0.25, 0.50, 0.75):
+        x = 1 + (W - 2) * f
+        draw.line([(x, body_top + 2), (x, body_bot - 2)],
+                  fill=(140, 24, 18, 220), width=1)
+    # Warm highlight
+    draw.ellipse([2, body_top + 2, W * 0.55, body_top + (body_bot - body_top) * 0.45],
+                 fill=(240, 180, 80, 100))
+    # Bottom tassel
+    draw.rectangle([W * 0.40, body_bot - 1, W * 0.60, body_bot + 4],
+                   fill=(60, 30, 30, 255))
+
+    return _ambient_cache_put(key, img)
+
+
+def _make_palm_image(height: int = 110, mirror: bool = False):
+    """Coconut-palm silhouette: thin trunk with a fan of fronds."""
+    if not HAS_PIL:
+        return None
+    key = ("palm", int(height), bool(mirror))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    H = max(40, int(height))
+    W = max(40, int(H * 0.85))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    trunk_color = (44, 30, 18, 220)
+    frond_dark  = (32, 70, 38, 235)
+    frond_mid   = (52, 116, 60, 230)
+
+    # Trunk: a gentle S-curve made of 3 line segments tapering inward.
+    tx0 = W * 0.42
+    ty0 = H - 2
+    tx1 = W * 0.50
+    ty1 = H * 0.55
+    tx2 = W * 0.45
+    ty2 = H * 0.30
+    for (a, b, wd) in (
+        ((tx0, ty0), (tx1, ty1), 4),
+        ((tx1, ty1), (tx2, ty2), 3),
+    ):
+        draw.line([a, b], fill=trunk_color, width=wd)
+
+    # Fronds: 7 ovals fanning from the crown
+    cx, cy = tx2, ty2
+    import math as _m
+    for i, ang_deg in enumerate(range(-100, 101, 33)):
+        ang = _m.radians(ang_deg - 15)
+        fx = cx + _m.cos(ang) * W * 0.30
+        fy = cy + _m.sin(ang) * H * 0.18
+        # Dark base + lighter top so they overlap nicely
+        r = W * 0.22
+        draw.ellipse([fx - r, fy - r * 0.30, fx + r, fy + r * 0.30],
+                     fill=frond_dark)
+    # Lighter top layer slightly offset for sheen
+    for i, ang_deg in enumerate(range(-95, 96, 38)):
+        ang = _m.radians(ang_deg - 12)
+        fx = cx + _m.cos(ang) * W * 0.26
+        fy = cy + _m.sin(ang) * H * 0.16
+        r = W * 0.18
+        draw.ellipse([fx - r, fy - r * 0.28, fx + r, fy + r * 0.28],
+                     fill=frond_mid)
+
+    if mirror:
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+    return _ambient_cache_put(key, img)
+
+
+def _make_sun_image(diameter: int = 60):
+    """Glowing sun: bright disc with a soft outer halo."""
+    if not HAS_PIL:
+        return None
+    key = ("sun", int(diameter))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    D = max(20, int(diameter))
+    img = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    c = D / 2.0
+    # Halo: a series of concentric semitransparent rings
+    for i, (r_frac, alpha) in enumerate((
+        (1.00,  30),
+        (0.85,  55),
+        (0.70,  85),
+        (0.58, 120),
+    )):
+        r = c * r_frac
+        draw.ellipse([c - r, c - r, c + r, c + r],
+                     fill=(255, 200, 80, alpha))
+    # Hot core
+    rc = c * 0.42
+    draw.ellipse([c - rc, c - rc, c + rc, c + rc],
+                 fill=(255, 240, 180, 245))
+    return _ambient_cache_put(key, img)
+
+
+def _make_mountain_image(width: int = 280, height: int = 70):
+    """Twin-peak mountain silhouette with a snow cap."""
+    if not HAS_PIL:
+        return None
+    key = ("mountain", int(width), int(height))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    W = max(40, int(width))
+    H = max(20, int(height))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    rock = (52, 60, 78, 220)
+    snow = (220, 230, 245, 235)
+    # Two peaks
+    peaks = [
+        (0, H - 1),
+        (W * 0.18, H * 0.35),
+        (W * 0.30, H * 0.55),
+        (W * 0.42, H * 0.20),
+        (W * 0.55, H * 0.55),
+        (W * 0.72, H * 0.45),
+        (W * 0.85, H * 0.65),
+        (W - 1, H - 1),
+    ]
+    draw.polygon(peaks, fill=rock)
+    # Snow caps on each peak
+    for (x, y) in ((W * 0.18, H * 0.35), (W * 0.42, H * 0.20)):
+        draw.polygon([
+            (x - W * 0.05, y + 5),
+            (x, y),
+            (x + W * 0.05, y + 5),
+        ], fill=snow)
+    return _ambient_cache_put(key, img)
+
+
+def _make_dune_image(width: int = 320, height: int = 60):
+    """Sandy dune silhouette for desert circuits (Bahrain, Qatar, Saudi)."""
+    if not HAS_PIL:
+        return None
+    key = ("dune", int(width), int(height))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    W = max(40, int(width))
+    H = max(15, int(height))
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    sand_dark = (98, 70, 38, 200)
+    sand_mid  = (158, 122, 68, 215)
+    # Back dune (darker)
+    pts = [(0, H - 1)]
+    for f in (0.10, 0.25, 0.40, 0.55, 0.70, 0.85, 1.00):
+        y = H * 0.50 + (0.18 if int(f * 10) % 2 == 0 else 0.06) * H * (1 if f < 0.5 else -1)
+        pts.append((W * f, y))
+    pts.append((W, H - 1))
+    draw.polygon(pts, fill=sand_dark)
+    # Front dune (lighter, lower)
+    pts2 = [(0, H - 1)]
+    for f in (0.10, 0.25, 0.40, 0.55, 0.70, 0.85, 1.00):
+        y = H * 0.70 + (0.12 if int(f * 10) % 2 == 1 else 0.05) * H * (-1 if f < 0.5 else 1)
+        pts2.append((W * f, y))
+    pts2.append((W, H - 1))
+    draw.polygon(pts2, fill=sand_mid)
+    return _ambient_cache_put(key, img)
 
 
 def _make_track_bg(w: int, h: int):
@@ -2987,92 +3409,127 @@ class ApexAI:
             if len(mom_placed) >= 2:
                 break
 
-        # ── Center podium ──
+        # ── Center podium with race trophy ──
         xs = [p[0] for p in track]
         ys = [p[1] for p in track]
         cx = (min(xs) + max(xs)) / 2
         cy = (min(ys) + max(ys)) / 2
 
-        # Sleek podium card: dark inset panel with a thin F1-red border and
-        # a faint inner glow.  Replaces the previous loose floating-text
-        # layout that read as cluttered against the track.
-        card_w, card_h = 220, 130
-        x0, y0 = cx - card_w / 2, cy - 64
-        x1, y1 = cx + card_w / 2, cy + card_h - 64
+        # The redesigned podium card features a procedural gold trophy on
+        # the left, with the winner + P2/P3 stack on the right.  Reads as
+        # a broadcast-graphic "winner's podium" presentation card.
+        #
+        # All podium items get a "podium" tag so we can `tag_raise` them
+        # in one shot after the driver labels are created – the card
+        # should always be the topmost layer so transient driver-card
+        # labels never partly obscure the winner readout.
+        card_w, card_h = 280, 140
+        x0, y0 = cx - card_w / 2, cy - 70
+        x1, y1 = cx + card_w / 2, cy + card_h - 70
+        PT = "podium"
 
         # Soft glow halo so the card lifts off the background.
         for off, alpha_color in ((6, "#180404"), (3, "#240608")):
             canvas.create_rectangle(
                 x0 - off, y0 - off, x1 + off, y1 + off,
-                outline=alpha_color, width=1,
+                outline=alpha_color, width=1, tags=(PT,),
             )
         # Card body + accent rule on top.
         canvas.create_rectangle(x0, y0, x1, y1,
-                                fill="#0d0d0e", outline=F1_RED, width=1)
+                                fill="#0d0d0e", outline=F1_RED, width=1,
+                                tags=(PT,))
         canvas.create_rectangle(x0, y0, x1, y0 + 3,
-                                fill=F1_RED, outline="")
+                                fill=F1_RED, outline="", tags=(PT,))
 
-        # Header label.
+        # Header strip
         canvas.create_text(
-            cx, y0 + 18,
+            cx, y0 + 16,
             text=self._viz_circuit.upper(),
             font=("Helvetica Neue", 9, "bold"),
-            fill=GRAY,
+            fill=GRAY, tags=(PT,),
         )
         canvas.create_text(
-            cx, y0 + 32,
-            text="PREDICTED PODIUM",
+            cx, y0 + 30,
+            text="PREDICTED PODIUM  ·  WINNER'S TROPHY",
             font=("Helvetica Neue", 7, "bold"),
-            fill=MUTED,
+            fill=MUTED, tags=(PT,),
         )
 
+        # Trophy artwork on the left
+        trophy_h = 78
+        if HAS_PIL:
+            trophy_img = _make_trophy_image(trophy_h)
+            if trophy_img is not None:
+                tk_trophy = ImageTk.PhotoImage(trophy_img)
+                self._tk_images.append(tk_trophy)
+                self._viz_trophy_tk = tk_trophy
+                canvas.create_image(
+                    x0 + 14 + trophy_img.size[0] / 2,
+                    y0 + 40 + trophy_img.size[1] / 2,
+                    image=tk_trophy, anchor="center", tags=(PT,),
+                )
+
+        # Right column: P1 hero block + P2/P3 split
+        right_x = x0 + 105
+        right_w = card_w - 110
+
         p1 = preds[0]
-        # P1 row.
         canvas.create_text(
-            cx, y0 + 56,
-            text=f"P1   {p1['abbreviation']}",
-            font=("Helvetica Neue", 19, "bold"),
-            fill=tc(p1["team"]),
+            right_x, y0 + 50,
+            text="WINNER",
+            font=("Helvetica Neue", 7, "bold"),
+            fill=GOLD_GLOW,
+            anchor="w", tags=(PT,),
         )
         canvas.create_text(
-            cx, y0 + 78,
-            text=f"{p1['probability']*100:.1f}%   ·   {p1['team']}",
-            font=("Helvetica Neue", 9),
+            right_x, y0 + 70,
+            text=p1["abbreviation"],
+            font=("Helvetica Neue", 22, "bold"),
+            fill=tc(p1["team"]),
+            anchor="w", tags=(PT,),
+        )
+        canvas.create_text(
+            right_x + 70, y0 + 73,
+            text=f"{p1['probability']*100:.1f}%",
+            font=("Helvetica Neue", 12, "bold"),
             fill=WHITE,
+            anchor="w", tags=(PT,),
+        )
+        canvas.create_text(
+            right_x, y0 + 92,
+            text=p1["team"],
+            font=("Helvetica Neue", 8),
+            fill=MUTED,
+            anchor="w", tags=(PT,),
         )
 
         if len(preds) >= 3:
             p2, p3 = preds[1], preds[2]
-            gap = 56
             # Subtle separator above P2/P3.
             canvas.create_line(
-                x0 + 16, y0 + 92, x1 - 16, y0 + 92,
-                fill="#2a1216", width=1,
+                right_x, y0 + 105, x1 - 14, y0 + 105,
+                fill="#2a1216", width=1, tags=(PT,),
             )
-            canvas.create_text(
-                cx - gap, y0 + 108,
-                text=f"P2  {p2['abbreviation']}",
-                font=("Helvetica Neue", 11, "bold"),
-                fill=tc(p2["team"]),
-            )
-            canvas.create_text(
-                cx - gap, y0 + 122,
-                text=f"{p2['probability']*100:.1f}%",
-                font=("Helvetica Neue", 8),
-                fill=MUTED,
-            )
-            canvas.create_text(
-                cx + gap, y0 + 108,
-                text=f"P3  {p3['abbreviation']}",
-                font=("Helvetica Neue", 11, "bold"),
-                fill=tc(p3["team"]),
-            )
-            canvas.create_text(
-                cx + gap, y0 + 122,
-                text=f"{p3['probability']*100:.1f}%",
-                font=("Helvetica Neue", 8),
-                fill=MUTED,
-            )
+            split = (right_w) / 2
+            for col, p, pos_label in (
+                (0, p2, "P2"),
+                (1, p3, "P3"),
+            ):
+                col_x = right_x + col * split
+                canvas.create_text(
+                    col_x, y0 + 118,
+                    text=f"{pos_label}  {p['abbreviation']}",
+                    font=("Helvetica Neue", 10, "bold"),
+                    fill=tc(p["team"]),
+                    anchor="w", tags=(PT,),
+                )
+                canvas.create_text(
+                    col_x, y0 + 132,
+                    text=f"{p['probability']*100:.1f}%",
+                    font=("Helvetica Neue", 8),
+                    fill=MUTED,
+                    anchor="w", tags=(PT,),
+                )
 
         # ── Animation — only top 8 drivers for performance ──
         max_anim = min(8, len(preds))
@@ -3172,6 +3629,12 @@ class ApexAI:
             })
 
         self._create_scene_anims(canvas, cw, ch)
+        # Keep the podium card on top of dot/label items so transient
+        # driver labels never partly obscure the trophy + winner readout.
+        try:
+            canvas.tag_raise("podium")
+        except tk.TclError:
+            pass
         self._anim_tick()
 
     # ── Circuit-specific animated decorations ──
@@ -3179,25 +3642,64 @@ class ApexAI:
     # Counts kept modest – each item is a Tk canvas item being repositioned
     # every frame.  The eye doesn't notice 15 vs 10 blossoms but Tk's canvas
     # recompositor definitely does.
+    # Per-circuit ambient theming.  Each entry is a list of (atom, count)
+    # tuples that get instantiated when the visualisation opens.  Atoms are
+    # divided into two groups:
+    #   • Animated atoms (blossom, lantern, leaf, confetti, …) update every
+    #     tick — keep counts modest.
+    #   • Decor atoms (bonsai, palm, sun, moon, mountain, dune, …) are
+    #     painted once as static PIL silhouettes — they cost nothing per
+    #     frame, so we can use them more freely to set the mood.
     SCENE_ANIMS = {
-        "Albert Park": [("kangaroo", 2)],
-        "Suzuka": [("blossom", 10)],
-        "Shanghai": [("blossom", 6)],
-        "Miami Autodrome": [("sparkle_water", 4)],
-        "Monaco": [("sparkle_water", 6)],
-        "Las Vegas Strip": [("firework", 2), ("neon_flash", 3)],
-        "Sakhir": [("star", 7)],
-        "Lusail": [("star", 7)],
-        "Spa-Francorchamps": [("rain", 10)],
-        "Zandvoort": [("seagull", 2)],
-        "Marina Bay": [("firework", 2), ("sparkle_water", 4)],
-        "Yas Marina": [("sparkle_water", 4), ("star", 5)],
-        "Interlagos": [("blossom", 5)],
-        "Jeddah Corniche": [("star", 6)],
-        "Baku City Circuit": [("seagull", 2)],
-        "Silverstone": [("rain", 6)],
-        "Red Bull Ring": [("seagull", 2)],
-        "COTA": [("star", 5)],
+        # Australia · eucalyptus drift + roo
+        "Albert Park":      [("kangaroo", 2), ("leaf", 6)],
+        # Japan · sakura petals, paper lanterns + bonsai garden corners
+        "Suzuka":           [("blossom", 12), ("lantern", 4),
+                              ("bonsai_l", 1), ("bonsai_r", 1)],
+        # China · spring petals + red lanterns
+        "Shanghai":         [("blossom", 8), ("lantern", 4)],
+        # Miami · sun-baked sparkle on the bay
+        "Miami Autodrome":  [("sparkle_water", 5), ("sun", 1)],
+        # Imola · Italian summer drift
+        "Imola":            [("leaf", 6), ("sun", 1)],
+        # Monaco · harbour shimmer + Mediterranean sun
+        "Monaco":           [("sparkle_water", 8), ("sun", 1)],
+        # Barcelona · sun-baked Catalan summer
+        "Barcelona-Catalunya": [("sun", 1), ("leaf", 5)],
+        # Canada · falling maples beside the St Lawrence
+        "Circuit Gilles Villeneuve": [("leaf", 8), ("sparkle_water", 3)],
+        # Spielberg · Austrian sky (Alps already in SCENES)
+        "Red Bull Ring":    [("seagull", 2), ("leaf", 3)],
+        # Silverstone · classic British rain
+        "Silverstone":      [("rain", 12)],
+        # Spa · Ardennes downpour (forest already in SCENES)
+        "Spa-Francorchamps": [("rain", 12), ("leaf", 4)],
+        # Zandvoort · seagulls over the dunes
+        "Zandvoort":        [("seagull", 3)],
+        # Monza · royal park tricolour confetti
+        "Monza":            [("confetti", 8), ("leaf", 4)],
+        # Baku · Caspian breeze, seagulls + shimmer
+        "Baku City Circuit": [("seagull", 2), ("sparkle_water", 4)],
+        # Singapore · Marina Bay neon fireworks
+        "Marina Bay":       [("firework", 2), ("sparkle_water", 5),
+                              ("neon_flash", 4)],
+        # COTA · Lone Star night
+        "COTA":             [("star", 8)],
+        # Mexico City · festival confetti
+        "Autódromo Hermanos Rodríguez": [("confetti", 7), ("star", 4)],
+        # Brazil · Interlagos blossoms + carnival confetti
+        "Interlagos":       [("blossom", 5), ("confetti", 6)],
+        # Las Vegas · neon strip + fireworks
+        "Las Vegas Strip":  [("firework", 3), ("neon_flash", 5),
+                              ("star", 6)],
+        # Qatar · desert sky (dunes already in SCENES)
+        "Lusail":           [("star", 10)],
+        # Saudi Arabia · desert stars
+        "Jeddah Corniche":  [("star", 8)],
+        # Abu Dhabi · Yas marina shimmer + stars
+        "Yas Marina":       [("sparkle_water", 5), ("star", 6)],
+        # Bahrain · desert sky (dunes already in SCENES)
+        "Sakhir":           [("star", 9)],
     }
 
     def _create_scene_anims(self, canvas, cw, ch):
@@ -3332,6 +3834,150 @@ class ApexAI:
                         "off_time": _rng.uniform(30, 80),
                         "color": color,
                     })
+
+                # ── Japan / China: paper lanterns sway from the top ──
+                elif atype == "lantern":
+                    if not HAS_PIL:
+                        continue
+                    h = _rng.randint(22, 30)
+                    img = _make_lantern_image(h)
+                    if img is None:
+                        continue
+                    tkimg = ImageTk.PhotoImage(img)
+                    self._tk_images.append(tkimg)
+                    # Lanterns hang from the top edge of the canvas
+                    lx = _rng.uniform(50, cw - 50)
+                    ly = _rng.uniform(20, ch * 0.18)
+                    iid = canvas.create_image(lx, ly, image=tkimg,
+                                              anchor="n")
+                    canvas.lower(iid)  # behind the track
+                    self._scene_items.append({
+                        "type": "lantern", "id": iid,
+                        "base_x": lx, "base_y": ly,
+                        "phase": _rng.uniform(0, 6.28),
+                        "speed": _rng.uniform(0.03, 0.06),
+                        "amp": _rng.uniform(4, 9),
+                    })
+
+                # ── Falling leaves (autumn red/gold/green) ──
+                elif atype == "leaf":
+                    lx = _rng.uniform(20, cw - 20)
+                    ly = _rng.uniform(-30, ch * 0.4)
+                    color = _rng.choice([
+                        "#c94a2a", "#d97a1f", "#e8b923",
+                        "#7a9a3a", "#a04a18",
+                    ])
+                    size = _rng.uniform(3, 5)
+                    leaf = canvas.create_oval(
+                        lx - size, ly - size * 0.55,
+                        lx + size, ly + size * 0.55,
+                        fill=color, outline="",
+                    )
+                    self._scene_items.append({
+                        "type": "leaf", "id": leaf,
+                        "x": lx, "y": ly, "size": size,
+                        "vx": _rng.uniform(-0.5, 0.5),
+                        "vy": _rng.uniform(0.5, 1.1),
+                        "sway": _rng.uniform(0, 6.28),
+                        "cw": cw, "ch": ch,
+                    })
+
+                # ── Carnival / Monza tricolour confetti ──
+                elif atype == "confetti":
+                    palette = ["#E10600", "#FFFFFF", "#2ED87A",
+                               "#FFD400", "#3FA8FF", "#FF6FA1"]
+                    color = _rng.choice(palette)
+                    cx_ = _rng.uniform(0, cw)
+                    cy_ = _rng.uniform(-40, ch * 0.4)
+                    w_ = _rng.uniform(3, 5)
+                    h_ = _rng.uniform(2, 4)
+                    conf = canvas.create_rectangle(
+                        cx_, cy_, cx_ + w_, cy_ + h_,
+                        fill=color, outline="",
+                    )
+                    self._scene_items.append({
+                        "type": "confetti", "id": conf,
+                        "x": cx_, "y": cy_, "w": w_, "h": h_,
+                        "vy": _rng.uniform(0.7, 1.4),
+                        "sway": _rng.uniform(0, 6.28),
+                        "swirl": _rng.uniform(0.04, 0.10),
+                        "cw": cw, "ch": ch,
+                    })
+
+                # ── Static PIL silhouettes pushed behind the track ──
+                elif atype in ("bonsai_l", "bonsai_r"):
+                    if not HAS_PIL:
+                        continue
+                    h = max(50, int(min(cw, ch) * 0.13))
+                    img = _make_bonsai_image(h, mirror=(atype == "bonsai_r"))
+                    if img is None:
+                        continue
+                    tkimg = ImageTk.PhotoImage(img)
+                    self._tk_images.append(tkimg)
+                    bx = 14 if atype == "bonsai_l" else cw - 14
+                    by = ch - 14
+                    anchor = "sw" if atype == "bonsai_l" else "se"
+                    iid = canvas.create_image(bx, by, image=tkimg,
+                                              anchor=anchor)
+                    canvas.lower(iid)
+
+                elif atype in ("palm_l", "palm_r"):
+                    if not HAS_PIL:
+                        continue
+                    h = max(80, int(min(cw, ch) * 0.22))
+                    img = _make_palm_image(h, mirror=(atype == "palm_r"))
+                    if img is None:
+                        continue
+                    tkimg = ImageTk.PhotoImage(img)
+                    self._tk_images.append(tkimg)
+                    px = 6 if atype == "palm_l" else cw - 6
+                    py = ch - 4
+                    anchor = "sw" if atype == "palm_l" else "se"
+                    iid = canvas.create_image(px, py, image=tkimg,
+                                              anchor=anchor)
+                    canvas.lower(iid)
+
+                elif atype == "sun":
+                    if not HAS_PIL:
+                        continue
+                    d = max(48, int(min(cw, ch) * 0.10))
+                    img = _make_sun_image(d)
+                    if img is None:
+                        continue
+                    tkimg = ImageTk.PhotoImage(img)
+                    self._tk_images.append(tkimg)
+                    # Top-right corner so it doesn't fight the F1 logo
+                    iid = canvas.create_image(cw - 20, 20, image=tkimg,
+                                              anchor="ne")
+                    canvas.lower(iid)
+
+                elif atype == "mountain":
+                    if not HAS_PIL:
+                        continue
+                    w_ = int(cw * 0.85)
+                    h_ = max(50, int(ch * 0.12))
+                    img = _make_mountain_image(w_, h_)
+                    if img is None:
+                        continue
+                    tkimg = ImageTk.PhotoImage(img)
+                    self._tk_images.append(tkimg)
+                    iid = canvas.create_image(cw / 2, 4, image=tkimg,
+                                              anchor="n")
+                    canvas.lower(iid)
+
+                elif atype == "dune":
+                    if not HAS_PIL:
+                        continue
+                    w_ = int(cw)
+                    h_ = max(40, int(ch * 0.10))
+                    img = _make_dune_image(w_, h_)
+                    if img is None:
+                        continue
+                    tkimg = ImageTk.PhotoImage(img)
+                    self._tk_images.append(tkimg)
+                    iid = canvas.create_image(0, ch, image=tkimg,
+                                              anchor="sw")
+                    canvas.lower(iid)
 
     # ── Pre-computed colour palettes for star / sparkle twinkle ──
     #
@@ -3477,6 +4123,45 @@ class ApexAI:
                 if item.get("_state") != desired:
                     itemcfg(item["id"], state=desired)
                     item["_state"] = desired
+
+            elif t == "lantern":
+                # Paper lantern pendulum sway – the canvas image item only
+                # needs its (x, y) anchor updated, no per-frame redraw of
+                # the bitmap itself.
+                item["phase"] += item["speed"] * dt_scale
+                dx = sin(item["phase"]) * item["amp"]
+                # Tiny vertical lift to mimic a rope length change
+                dy = cos(item["phase"] * 0.5) * 1.5
+                coords(item["id"], item["base_x"] + dx,
+                       item["base_y"] + dy)
+
+            elif t == "leaf":
+                item["x"] += (item["vx"] + sin(item["sway"] + frame * 0.04) * 0.55) * dt_scale
+                item["y"] += item["vy"] * dt_scale
+                if item["y"] > item["ch"] + 12:
+                    item["y"] = -12
+                    item["x"] = self._rng.uniform(20, item["cw"] - 20)
+                s = item["size"]
+                # Subtle horizontal stretch so it looks like a leaf
+                # flipping as it falls (cheap pseudo-rotation).
+                stretch = 0.45 + 0.55 * abs(sin(item["sway"] + frame * 0.08))
+                coords(item["id"],
+                       item["x"] - s * stretch, item["y"] - s * 0.55,
+                       item["x"] + s * stretch, item["y"] + s * 0.55)
+
+            elif t == "confetti":
+                # Falling confetti with a swirling horizontal drift and a
+                # pseudo-rotation that flattens / re-widens the rectangle.
+                item["y"] += item["vy"] * dt_scale
+                item["x"] += sin(item["sway"] + frame * item["swirl"]) * 0.9 * dt_scale
+                if item["y"] > item["ch"] + 10:
+                    item["y"] = -10
+                    item["x"] = self._rng.uniform(0, item["cw"])
+                # Pseudo-rotation by oscillating the width
+                w_eff = item["w"] * (0.35 + 0.65 * abs(cos(item["sway"] + frame * 0.18)))
+                coords(item["id"],
+                       item["x"], item["y"],
+                       item["x"] + w_eff, item["y"] + item["h"])
 
     # ── Smooth animation loop ──
 
