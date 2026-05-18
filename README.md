@@ -26,9 +26,10 @@ playback.
   Cadillac and Audi power units are all wired in. The training pipeline
   automatically re-fetches if `data.csv` is missing rounds from the latest
   completed weekend.
-- **Race-day GUI** (`app.py`) — Tk + PIL interface with three tabs:
-  *Predict Next Race*, *Backtest All Races*, *Race Visualisation*, and a
-  *Team Radio* deck.
+- **Race-day GUI** (`app.py`) — Tk + PIL interface with four tabs —
+  *Predict Next Race*, *Backtest All Races*, *Race Visualization*, and
+  *Team Radio* — plus a one-click *Refresh* to retrain on the latest
+  data.
   - 30 fps animated track-map visualisation with per-driver dots, MOM
     zones, and a podium card featuring a procedural gold trophy.
   - Per-race ambient theming: sakura petals, paper lanterns and bonsai
@@ -38,8 +39,10 @@ playback.
     circuits, and more.
   - Singleton enforcement — launching `app.py` while another instance is
     open replaces the older window.
-  - Prediction + model caching with a version-tagged cache (`_*.pkl`) so
-    the second launch is instantaneous.
+  - Prediction + model caching (`model_cache.pkl`, `last_predictions.pkl`)
+    is stamped with a `MODEL_VERSION` so a relaunch on a bumped model
+    rebuilds automatically and a relaunch on the same version is
+    instantaneous.
 - **Full-race team radio** (`radio_fia.py`) — radio clips are fetched
   directly from the FIA livetiming archive (with OpenF1 as a fallback) and
   each clip is mapped to its lap number by matching its capture timestamp
@@ -57,8 +60,8 @@ matplotlib, Pillow, `f1radio[playback]`, `playsound3`.
 The first launch downloads timing data through the official F1 API and
 caches it in `cache/`. If `data.csv` is missing or stale, race results from
 2022 through the most recent completed 2026 round are pulled to rebuild the
-training dataset (~5 minutes on a cold start; near-instant on subsequent
-launches).
+training dataset (cold-start can take a few minutes the first time;
+subsequent launches hydrate from the cache and are near-instant).
 
 ## Usage
 
@@ -70,7 +73,7 @@ python app.py
 
 Click **Predict Next Race** to fetch data, train the model, and view the
 podium card + win probabilities for the next round. Switch to **Race
-Visualisation** to see the animated circuit map with the per-race ambient
+Visualization** to see the animated circuit map with the per-race ambient
 scene, or to **Team Radio** to play back the full race radio for any
 driver.
 
