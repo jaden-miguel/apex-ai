@@ -4,3 +4,5 @@ scikit-learn
 numpy
 matplotlib
 Pillow
+f1radio[playback]
+playsound3

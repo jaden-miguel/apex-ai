@@ -95,19 +95,47 @@ def create_badge(team_name: str, size: int = 28) -> "Image.Image":
 
 
 def load_logo(team_name: str, size: int = 28) -> "Image.Image":
-    """Load team logo from assets or create badge."""
+    """Load a team logo from ``logos/`` and fit it into ``size``×``size``.
+
+    Many of the official team logos are wide wordmarks (e.g. McLaren or
+    Williams are ~4:1) rather than square crests.  Naively forcing them
+    to a square aspect ratio – which the previous version of this
+    helper did – squashed the artwork and made Mercedes' silver star
+    visibly pixelated at small sizes.  Instead we now scale the source
+    to *fit* inside the requested box while preserving aspect ratio,
+    then centre it on a transparent square so the UI can drop it into
+    any cell without further alignment work.
+
+    We also normalise to ``RGBA`` first so files saved in palettised
+    or luminance+alpha modes (Aston Martin, Audi, the F1 wordmark…) all
+    render correctly.
+    """
     if not HAS_PIL:
         return None
     base = Path(__file__).parent
     key = TEAM_LOGO_KEYS.get(team_name, team_name.lower().replace(" ", "").replace("f1team", ""))
+    resample = getattr(Image, "Resampling", Image).LANCZOS
     for ext in ("png", "jpg", "webp"):
         for folder in ("logos", "assets/logos"):
             path = base / folder / f"{key}.{ext}"
-            if path.exists():
-                try:
-                    img = Image.open(path).convert("RGBA")
-                    img = img.resize((size, size), getattr(Image, "Resampling", Image).LANCZOS)
-                    return img
-                except Exception:
-                    pass
+            if not path.exists():
+                continue
+            try:
+                src = Image.open(path).convert("RGBA")
+            except Exception:
+                continue
+            sw, sh = src.size
+            if sw <= 0 or sh <= 0:
+                continue
+            scale = min(size / sw, size / sh)
+            new_w = max(1, int(round(sw * scale)))
+            new_h = max(1, int(round(sh * scale)))
+            resized = src.resize((new_w, new_h), resample)
+            canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            canvas.paste(
+                resized,
+                ((size - new_w) // 2, (size - new_h) // 2),
+                resized,
+            )
+            return canvas
     return create_badge(team_name, size)

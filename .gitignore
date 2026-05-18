@@ -7,4 +7,15 @@ dist/
 .build_venv/
 .venv/
 model_cache.pkl
+last_predictions.pkl
+.apex_ai.lock
+radio_cache/
 *.pyc
+
+# Local dev / debugging artefacts – never commit
+screenshot_*.png
+radio_*.png
+radio2_*.png
+viz_*.png
+_*.py
+_*.png
