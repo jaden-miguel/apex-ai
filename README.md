@@ -1,14 +1,49 @@
-# ApexAI: F1 Winner Predictor
+# ApexAI — F1 Race Predictor
 
-This project downloads Formula 1 race results with the
-[FastF1](https://github.com/theOehrly/Fast-F1) library and trains a Gradient
-Boosting model to estimate each driver's chance of winning the next race. The
-model uses rolling performance features — recent win rate, podium rate, average
-finish position, head-to-head vs teammate, driver experience, and team form — on
-top of cumulative championship points. `RandomizedSearchCV` tunes
-hyperparameters over 12 iterations with 5-fold CV. Includes a race-themed GUI
-with track visualization, circuit-specific animations, team radio playback, and
-supports the 2026 driver lineup.
+ApexAI is an end-to-end Formula 1 race prediction suite. It ingests timing
+data with [FastF1](https://github.com/theOehrly/Fast-F1), trains a Gradient
+Boosting Classifier on five seasons of race history (2022 – 2026
+mid-season), and presents calibrated win probabilities for the next race
+inside a custom Tk + PIL desktop app — complete with a procedural gold
+winner's-trophy podium, per-circuit ambient theming, and live FIA team-radio
+playback.
+
+![ApexAI GUI](screenshot.png)
+
+## Highlights
+
+- **Calibrated win probabilities** — Gradient Boosting Classifier
+  (`prediction.py`) tuned with `RandomizedSearchCV` over a
+  `TimeSeriesSplit` (5-fold, ROC-AUC scoring) so the model never trains on
+  races run after the validation set. Raw logits are softmax-calibrated
+  with a temperature term so the grid sums to 100 % and no driver collapses
+  to a 0 % outlier.
+- **Rich feature engineering** — cumulative championship points, rolling
+  win/podium rates, average finish, head-to-head vs teammate, DNF rate,
+  driver experience, and team / power-unit form, all derived on the fly
+  from FastF1 results.
+- **2026 mid-season build** — driver lineup, team roster, and the new
+  Cadillac and Audi power units are all wired in. The training pipeline
+  automatically re-fetches if `data.csv` is missing rounds from the latest
+  completed weekend.
+- **Race-day GUI** (`app.py`) — Tk + PIL interface with three tabs:
+  *Predict Next Race*, *Backtest All Races*, *Race Visualisation*, and a
+  *Team Radio* deck.
+  - 30 fps animated track-map visualisation with per-driver dots, MOM
+    zones, and a podium card featuring a procedural gold trophy.
+  - Per-race ambient theming: sakura petals, paper lanterns and bonsai
+    corners at Suzuka; a Mediterranean sun over Monaco; carnival confetti
+    at Interlagos and Mexico City; neon + fireworks on the Vegas Strip;
+    rain over Silverstone and Spa; starlit skies over the desert
+    circuits, and more.
+  - Singleton enforcement — launching `app.py` while another instance is
+    open replaces the older window.
+  - Prediction + model caching with a version-tagged cache (`_*.pkl`) so
+    the second launch is instantaneous.
+- **Full-race team radio** (`radio_fia.py`) — radio clips are fetched
+  directly from the FIA livetiming archive (with OpenF1 as a fallback) and
+  each clip is mapped to its lap number by matching its capture timestamp
+  against the race event log. Plays back through `playsound3`.
 
 ## Setup
 
@@ -16,9 +51,14 @@ supports the 2026 driver lineup.
 pip install -r requirements.txt
 ```
 
-The first run will download timing data from the official F1 API and cache it in
-`cache/`. If `data.csv` is not present, race results from 2022–2025 are
-downloaded to build the training dataset.
+Dependencies (`requirements.txt`): FastF1, pandas, scikit-learn, numpy,
+matplotlib, Pillow, `f1radio[playback]`, `playsound3`.
+
+The first launch downloads timing data through the official F1 API and
+caches it in `cache/`. If `data.csv` is missing or stale, race results from
+2022 through the most recent completed 2026 round are pulled to rebuild the
+training dataset (~5 minutes on a cold start; near-instant on subsequent
+launches).
 
 ## Usage
 
@@ -28,9 +68,11 @@ downloaded to build the training dataset.
 python app.py
 ```
 
-Launch the race-themed interface. Click **RUN PREDICTIONS** to fetch data, train
-the model, and see win probabilities for the next race with a podium-style
-layout and full grid.
+Click **Predict Next Race** to fetch data, train the model, and view the
+podium card + win probabilities for the next round. Switch to **Race
+Visualisation** to see the animated circuit map with the per-race ambient
+scene, or to **Team Radio** to play back the full race radio for any
+driver.
 
 ### Command line
 
@@ -38,34 +80,49 @@ layout and full grid.
 python predict_winner.py
 ```
 
-Prints the predicted winner for the last race, the upcoming round, and overall
-model accuracy.
+Prints the predicted winner of the most recent race, the upcoming round,
+and the model's overall validation accuracy.
 
-## Team logos (optional)
+## Team logos
 
-To use official team logos instead of colored badges:
+To use the official team logos instead of coloured initials badges:
 
-1. Run `python fetch_logos.py` to download logos to `logos/`
-2. Or add PNG files manually: `logos/redbull.png`, `logos/ferrari.png`, etc.
+```bash
+python fetch_logos.py
+```
 
-Without logos, the app shows colored badges with team initials.
+This downloads up-to-date PNGs (Wikimedia thumbnails, 500 px wide) to
+`logos/`. `--force` re-downloads existing files. Logos are auto-cropped and
+aspect-preservingly resized at runtime, with icon-only crops used at small
+sizes (grid rows, podium) for legibility.
 
-## Building a Mac Executable
+## Project layout
 
-To create a standalone Mac `.app`:
+```
+app.py            Tk + PIL desktop app (GUI, viz, radio deck)
+prediction.py     Data ingest, feature engineering, model training,
+                  caching, and inference
+predict_winner.py Headless CLI entry point
+radio_fia.py      FIA livetiming archive client for full-race radio
+team_colors.py    Official team-colour palette
+team_logos.py     Logo loading, icon cropping, alpha-aware resizing
+track_layouts.py  Hand-curated layouts for every 2026 circuit
+fetch_logos.py    Wikimedia logo downloader
+```
 
-1. Install PyInstaller: `pip install pyinstaller`
-2. Run: `./build_mac.sh`
+## Building a Mac executable (optional)
 
-The app will be at `dist/F1 Winner Predictor.app`. You can drag it to
-Applications. Data and cache are stored in
+```bash
+pip install pyinstaller
+./build_mac.sh
+```
+
+Produces `dist/F1 Winner Predictor.app`. Data and cache live in
 `~/Library/Application Support/F1 Winner Predictor/`.
 
-## Data Source
+## Data source
 
-Race and timing data is retrieved via `fastf1`, which accesses the official F1
-live timing API.
-
-## Screenshot
-
-![ApexAI GUI](screenshot.png)
+Race and timing data is retrieved via `fastf1`, which talks to the
+official F1 live timing API. Team radio is sourced from the FIA
+livetiming archive (`TeamRadio.json` + `TeamRadio.jsonStream`) with
+OpenF1 as a fallback.
