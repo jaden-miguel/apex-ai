@@ -10,6 +10,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +54,7 @@ from prediction import (
     F1_POINTS,
     load_last_result,
     acquire_singleton,
+    get_event_schedule_cached,
 )
 from team_colors import TEAM_COLORS
 from team_logos import load_logo
@@ -258,33 +261,69 @@ def _make_f1_logo(height: int = 40):
 # ---------------------------------------------------------------------------
 # Trophy artwork
 # ---------------------------------------------------------------------------
-def _make_trophy_image(height: int = 60):
-    """Render a stylised F1-style gold trophy as a PIL RGBA image.
+# Metallic palettes for each podium tier.  Each tuple is
+# (highlight, mid, dark, edge) – four shades let us paint a 3D-looking cup
+# + handles + stem + base on a flat 2D canvas.  The bronze palette is a
+# warm copper-brown so it reads distinctly from gold; silver is cool grey
+# so it doesn't get confused with the off-white card type.
+_TROPHY_PALETTES = {
+    "gold": (
+        (255, 232, 140, 255),
+        (240, 195,  82, 255),
+        (170, 120,  35, 255),
+        (110,  72,  18, 255),
+    ),
+    "silver": (
+        (245, 247, 252, 255),
+        (200, 206, 218, 255),
+        (138, 145, 158, 255),
+        ( 78,  84,  96, 255),
+    ),
+    "bronze": (
+        (240, 178, 112, 255),
+        (198, 124,  58, 255),
+        (136,  78,  30, 255),
+        ( 78,  42,  12, 255),
+    ),
+}
 
-    Cached by height – the trophy is static once drawn, so re-renders are
-    free.  The result is roughly square (slightly taller than wide to fit
-    the cup + stem + base proportions of a real F1 trophy).
 
-    The trophy is painted in three gold tones (highlight, mid, shadow) so
-    it reads as a 3D object on the dark podium card rather than as a flat
-    silhouette.  An "F1" engraving on the base ties it back to the brand.
+def _make_trophy_image(height: int = 60, tier: str = "gold"):
+    """Render a stylised F1-style podium trophy as a PIL RGBA image.
+
+    Cached by ``(height, tier)`` – the trophy is static once drawn, so
+    re-renders are free.  The result is roughly square (slightly taller
+    than wide to fit the cup + stem + base proportions of a real F1
+    trophy).
+
+    Painted in four metallic tones (highlight → mid → dark → edge) so the
+    cup reads as a 3D object on the dark podium card rather than as a
+    flat silhouette.  An "F1" engraving on the base ties it back to the
+    brand on the gold trophy; silver/bronze get position numerals (2/3)
+    instead so the three trophies are unambiguous from a glance.
     """
     if not HAS_PIL:
         return None
-    if height in _TROPHY_CACHE:
-        return _TROPHY_CACHE[height]
+    cache_key = (int(height), tier)
+    if cache_key in _TROPHY_CACHE:
+        return _TROPHY_CACHE[cache_key]
 
-    H = max(24, int(height))
-    W = max(20, int(H * 0.85))
+    palette = _TROPHY_PALETTES.get(tier, _TROPHY_PALETTES["gold"])
+    gold_hi, gold_mid, gold_dark, gold_edge = palette
+    base_label = {"gold": "F1", "silver": "2", "bronze": "3"}.get(tier, "F1")
+
+    # Final output size.
+    H_out = max(24, int(height))
+    W_out = max(20, int(H_out * 0.85))
+
+    # Supersampling factor — PIL's draw primitives don't anti-alias, which
+    # is what makes the trophy look 8-bit/pixelated.  We render at 4x and
+    # downsample with LANCZOS so every curve gets free anti-aliasing.
+    SS = 4
+    H = H_out * SS
+    W = W_out * SS
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-
-    # Gold palette – warm broadcast-style golds, brighter than the team
-    # GOLD constant so the trophy pops off the BG_CARD background.
-    gold_hi   = (255, 232, 140, 255)
-    gold_mid  = (240, 195,  82, 255)
-    gold_dark = (170, 120,  35, 255)
-    gold_edge = (110,  72,  18, 255)
 
     cx = W / 2.0
 
@@ -294,57 +333,57 @@ def _make_trophy_image(height: int = 60):
     cup_w   = int(W * 0.62)
     draw.ellipse(
         [cx - cup_w / 2, cup_top, cx + cup_w / 2, cup_bot],
-        fill=gold_mid, outline=gold_edge, width=1,
+        fill=gold_mid, outline=gold_edge, width=SS,
     )
     # Lip (thin band at the top of the cup)
-    lip_h = max(2, int(H * 0.05))
+    lip_h = max(2 * SS, int(H * 0.05))
     draw.ellipse(
-        [cx - cup_w / 2, cup_top - 1,
+        [cx - cup_w / 2, cup_top - SS,
          cx + cup_w / 2, cup_top + lip_h],
-        fill=gold_dark, outline=gold_edge, width=1,
+        fill=gold_dark, outline=gold_edge, width=SS,
     )
     # Inner well (darker oval to suggest cup depth)
     draw.ellipse(
-        [cx - cup_w / 2 + 2, cup_top + 1,
-         cx + cup_w / 2 - 2, cup_top + lip_h - 1],
+        [cx - cup_w / 2 + 2 * SS, cup_top + SS,
+         cx + cup_w / 2 - 2 * SS, cup_top + lip_h - SS],
         fill=gold_edge, outline=None,
     )
     # Highlight – small lighter ellipse on the upper-left curve
     hl_x0 = cx - cup_w / 3
-    hl_y0 = cup_top + lip_h + 2
+    hl_y0 = cup_top + lip_h + 2 * SS
     hl_x1 = hl_x0 + cup_w * 0.18
     hl_y1 = hl_y0 + (cup_bot - cup_top) * 0.55
     draw.ellipse([hl_x0, hl_y0, hl_x1, hl_y1], fill=gold_hi, outline=None)
 
     # ── Handles (curved arcs hugging the cup) ──
-    handle_w = max(3, int(W * 0.16))
+    handle_w = max(3 * SS, int(W * 0.16))
     h_top = int(H * 0.16)
     h_bot = int(H * 0.42)
     # Left
     draw.arc(
-        [cx - cup_w / 2 - handle_w + 1, h_top,
-         cx - cup_w / 2 + 4,           h_bot],
-        start=60, end=300, fill=gold_mid, width=3,
+        [cx - cup_w / 2 - handle_w + SS, h_top,
+         cx - cup_w / 2 + 4 * SS,        h_bot],
+        start=60, end=300, fill=gold_mid, width=3 * SS,
     )
     draw.arc(
-        [cx - cup_w / 2 - handle_w + 1, h_top,
-         cx - cup_w / 2 + 4,           h_bot],
-        start=60, end=300, fill=gold_edge, width=1,
+        [cx - cup_w / 2 - handle_w + SS, h_top,
+         cx - cup_w / 2 + 4 * SS,        h_bot],
+        start=60, end=300, fill=gold_edge, width=SS,
     )
     # Right
     draw.arc(
-        [cx + cup_w / 2 - 4,           h_top,
-         cx + cup_w / 2 + handle_w - 1, h_bot],
-        start=240, end=120, fill=gold_mid, width=3,
+        [cx + cup_w / 2 - 4 * SS,        h_top,
+         cx + cup_w / 2 + handle_w - SS, h_bot],
+        start=240, end=120, fill=gold_mid, width=3 * SS,
     )
     draw.arc(
-        [cx + cup_w / 2 - 4,           h_top,
-         cx + cup_w / 2 + handle_w - 1, h_bot],
-        start=240, end=120, fill=gold_edge, width=1,
+        [cx + cup_w / 2 - 4 * SS,        h_top,
+         cx + cup_w / 2 + handle_w - SS, h_bot],
+        start=240, end=120, fill=gold_edge, width=SS,
     )
 
     # ── Stem (tapering bridge between cup and base) ──
-    stem_top = cup_bot - 1
+    stem_top = cup_bot - SS
     stem_bot = int(H * 0.72)
     stem_top_w = int(W * 0.22)
     stem_mid_w = int(W * 0.10)
@@ -376,33 +415,162 @@ def _make_trophy_image(height: int = 60):
     ], fill=gold_dark, outline=gold_edge)
     # Thin highlight along the top of the base for sheen
     draw.line(
-        [(cx - base_top_w / 2 + 2, base_top + 1),
-         (cx + base_top_w / 2 - 2, base_top + 1)],
-        fill=gold_hi, width=1,
+        [(cx - base_top_w / 2 + 2 * SS, base_top + SS),
+         (cx + base_top_w / 2 - 2 * SS, base_top + SS)],
+        fill=gold_hi, width=SS,
     )
-    # "F1" engraving in F1 red on the base if we can find a bold font
-    if H >= 36:
+    # Engraving on the base — "F1" for gold, "2"/"3" for silver/bronze.
+    # Silver/bronze numerals use the trophy's own dark tone so they read
+    # like a tasteful etched engraving instead of fighting the F1 red.
+    if H_out >= 36:
         try:
-            f1_font = ImageFont.truetype("arialbd.ttf", max(7, int(H * 0.11)))
+            f1_font = ImageFont.truetype("arialbd.ttf", max(7 * SS, int(H * 0.11)))
         except (OSError, IOError):
             try:
                 f1_font = ImageFont.load_default()
             except Exception:
                 f1_font = None
         if f1_font is not None:
-            text = "F1"
+            text = base_label
             try:
                 bbox = draw.textbbox((0, 0), text, font=f1_font)
                 tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
                 tx = cx - tw / 2 - bbox[0]
                 ty = base_top + ((base_bot - base_top) - th) / 2 - bbox[1]
             except Exception:
-                tw, th = f1_font.getsize(text) if hasattr(f1_font, "getsize") else (10, 10)
+                tw, th = f1_font.getsize(text) if hasattr(f1_font, "getsize") else (10 * SS, 10 * SS)
                 tx = cx - tw / 2
                 ty = base_top + ((base_bot - base_top) - th) / 2
-            draw.text((tx, ty), text, font=f1_font, fill=F1_RED_RGB + (255,))
+            engrave = F1_RED_RGB + (255,) if tier == "gold" else gold_edge
+            draw.text((tx, ty), text, font=f1_font, fill=engrave)
 
-    _TROPHY_CACHE[height] = img
+    # Down-sample with LANCZOS for smooth, anti-aliased edges.
+    img = img.resize((W_out, H_out), Image.LANCZOS)
+
+    _TROPHY_CACHE[cache_key] = img
+    return img
+
+
+# ---------------------------------------------------------------------------
+# Laurel wreath – frames the gold trophy on the podium card so the
+# winner's slot reads as a proper "champion" presentation rather than a
+# bare cup.  Two mirrored sprigs of leaves curve up from a single central
+# point, painted in olive-green with gold highlights for that broadcast
+# graphic feel.
+# ---------------------------------------------------------------------------
+def _make_laurel_image(width: int = 110, height: int = 96):
+    """Render a laurel wreath as a transparent PIL image.  Cached by size.
+
+    Drawn at 3× resolution and downsampled with LANCZOS so the leaf
+    edges and ribbon polygons end up cleanly anti-aliased instead of
+    showing PIL's stair-stepped pixel boundaries.
+    """
+    if not HAS_PIL:
+        return None
+    key = ("laurel", int(width), int(height))
+    cached = _AMBIENT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    W_out, H_out = max(40, int(width)), max(40, int(height))
+    SS = 3
+    W, H = W_out * SS, H_out * SS
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    leaf_dark = (60,  92,  44, 235)
+    leaf_mid  = (98, 142,  60, 240)
+    leaf_hi   = (170, 198,  92, 235)
+    gold_tip  = (240, 200,  92, 235)
+
+    cx_b = W / 2.0
+    cy_b = H * 0.95         # bottom anchor where the two sprigs meet
+
+    # Each sprig is a series of leaves sweeping along a quarter-circle arc
+    # from the bottom-centre out to the side and up to the top.
+    leaf_count = 9
+    for side in (-1, 1):
+        for i in range(leaf_count):
+            t = i / max(1, leaf_count - 1)
+            # Polar position along the wreath's arc (right or left).
+            angle = math.pi * 0.05 + t * math.pi * 0.85
+            r = W * 0.42
+            x = cx_b + side * r * math.sin(angle)
+            y = cy_b - r * (math.cos(angle) * 0.55 + 0.15) - H * 0.1
+
+            # Leaf size tapers towards the tips so the wreath silhouette
+            # has the classic Greek "chaplet" curve.
+            taper = 1.0 - 0.45 * t
+            lw = max(4 * SS, int(W * 0.10 * taper))
+            lh = max(8 * SS, int(H * 0.18 * taper))
+
+            # Tilt every leaf so the bunch looks layered, not radial.
+            tilt_deg = -side * (35 + 25 * (1 - t))
+
+            leaf = Image.new("RGBA", (lw + 2, lh + 2), (0, 0, 0, 0))
+            ld = ImageDraw.Draw(leaf)
+            ld.ellipse([1, 1, lw, lh],
+                       fill=leaf_mid, outline=leaf_dark, width=SS)
+            ld.ellipse([2, 1, lw // 2 + 2, lh - 2],
+                       fill=leaf_hi, outline=None)
+            leaf = leaf.rotate(tilt_deg, resample=Image.BICUBIC, expand=True)
+            img.alpha_composite(
+                leaf,
+                (int(x - leaf.size[0] / 2), int(y - leaf.size[1] / 2)),
+            )
+
+    # A small gold ribbon at the bottom where the two sprigs meet.
+    ribbon_w = int(W * 0.30)
+    ribbon_h = max(4 * SS, int(H * 0.07))
+    rx0 = int(cx_b - ribbon_w / 2)
+    ry0 = int(cy_b - ribbon_h / 2)
+    draw.rectangle([rx0, ry0, rx0 + ribbon_w, ry0 + ribbon_h],
+                   fill=gold_tip, outline=(140, 92, 28, 255))
+    # Two trailing tails on each side of the ribbon.
+    tail_y = ry0 + ribbon_h - 1
+    for dx, sign in ((-ribbon_w * 0.45, -1), (ribbon_w * 0.45, 1)):
+        tx = int(cx_b + dx)
+        draw.polygon(
+            [(tx, tail_y),
+             (tx + sign * int(ribbon_w * 0.25), tail_y + int(ribbon_h * 1.6)),
+             (tx, tail_y + int(ribbon_h * 0.6))],
+            fill=gold_tip, outline=(140, 92, 28, 255),
+        )
+
+    img = img.resize((W_out, H_out), Image.LANCZOS)
+    _AMBIENT_CACHE[key] = img
+    return img
+
+
+# ---------------------------------------------------------------------------
+# Champagne / sparkle accents – subtle decorative bits scattered around
+# the podium card that give the visualisation a "celebration" feel without
+# adding visual noise.
+# ---------------------------------------------------------------------------
+def _make_sparkle_image(size: int = 14, color=(255, 232, 140, 255)):
+    """Tiny 4-point starburst.  Used to pepper the gold trophy with a
+    handful of broadcast-style highlights."""
+    if not HAS_PIL:
+        return None
+    key = ("sparkle", int(size), color)
+    cached = _AMBIENT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    s = max(6, int(size))
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    cx_s, cy_s = s / 2, s / 2
+    # Long N/S and E/W rays, shorter diagonals.
+    draw.line([(cx_s, 1), (cx_s, s - 2)], fill=color, width=1)
+    draw.line([(1, cy_s), (s - 2, cy_s)], fill=color, width=1)
+    soft = (color[0], color[1], color[2], max(60, color[3] // 3))
+    draw.line([(2, 2), (s - 3, s - 3)], fill=soft, width=1)
+    draw.line([(s - 3, 2), (2, s - 3)], fill=soft, width=1)
+    # Bright core dot.
+    draw.ellipse([cx_s - 1, cy_s - 1, cx_s + 1, cy_s + 1], fill=color)
+
+    _AMBIENT_CACHE[key] = img
     return img
 
 
@@ -478,6 +646,104 @@ def _make_bonsai_image(height: int = 56, mirror: bool = False):
     if mirror:
         img = img.transpose(Image.FLIP_LEFT_RIGHT)
     return _ambient_cache_put(key, img)
+
+
+# ---------------------------------------------------------------------------
+# Canadian maple leaf – the iconic 11-pointed silhouette.  Rendered as a
+# single anti-aliased polygon at 4× resolution and downsampled with
+# LANCZOS so the lobes / serrations look hand-cut rather than pixelated.
+# Used for the Circuit Gilles Villeneuve scene.
+# ---------------------------------------------------------------------------
+# The right-half outline of the canonical Canadian maple leaf, traced
+# top-to-bottom on a unit square.  The polygon is built by emitting these
+# points and then mirroring them about x = 0.5 so the silhouette stays
+# perfectly symmetric.
+_MAPLE_LEAF_HALF = (
+    (0.50, 0.04),    # top point
+    (0.55, 0.18),    # inset under top
+    (0.74, 0.16),    # upper-right shoulder lobe
+    (0.66, 0.30),    # inset
+    (0.93, 0.40),    # middle-right outer point
+    (0.74, 0.52),    # inset
+    (0.96, 0.66),    # lower-right outer point
+    (0.62, 0.66),    # inner notch above stem
+    (0.66, 0.84),    # near-stem shoulder
+    (0.55, 0.83),    # stem top-right
+    (0.55, 0.96),    # stem bottom-right
+)
+
+
+def _make_maple_leaf_image(size: int = 18, color=(213, 43, 30, 245)):
+    """Stylised Canadian maple leaf as an RGBA PIL image."""
+    if not HAS_PIL:
+        return None
+    key = ("maple_leaf", int(size), tuple(color))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    SS = 4
+    S_out = max(8, int(size))
+    S = S_out * SS
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    pts = [(x * S, y * S) for (x, y) in _MAPLE_LEAF_HALF]
+    pts.append((0.50 * S, 0.99 * S))
+    for (x, y) in reversed(_MAPLE_LEAF_HALF):
+        pts.append(((1.0 - x) * S, y * S))
+
+    edge = (
+        max(0, color[0] - 90),
+        max(0, color[1] - 25),
+        max(0, color[2] - 25),
+        255,
+    )
+    draw.polygon(pts, fill=color, outline=edge)
+
+    # Single hint of a central vein so the leaf doesn't read as a flat
+    # silhouette at larger sizes.
+    vein_color = (
+        max(0, color[0] - 50),
+        max(0, color[1] - 14),
+        max(0, color[2] - 14),
+        200,
+    )
+    draw.line(
+        [(0.50 * S, 0.92 * S), (0.50 * S, 0.20 * S)],
+        fill=vein_color,
+        width=max(1, SS // 2),
+    )
+
+    img = img.resize((S_out, S_out), Image.LANCZOS)
+    return _ambient_cache_put(key, img)
+
+
+def _maple_leaf_rotation_frames(size: int, frame_count: int = 6):
+    """Pre-render a small set of rotated maple-leaf frames so tumbling
+    leaves can swap images at runtime instead of paying for a fresh
+    PIL.Image.rotate every animation tick."""
+    if not HAS_PIL:
+        return []
+    key = ("maple_rot", int(size), int(frame_count))
+    cached = _ambient_cache_get(key)
+    if cached is not None:
+        return cached
+
+    base = _make_maple_leaf_image(size)
+    if base is None:
+        return []
+
+    frames = []
+    for i in range(frame_count):
+        deg = 360.0 * i / frame_count
+        # ``expand=True`` keeps every rotation frame at the same physical
+        # size of the rotated bounding box, so cycling between them
+        # doesn't introduce a visible "jump" mid-fall.
+        rot = base.rotate(deg, resample=Image.BICUBIC, expand=True)
+        frames.append(rot)
+
+    return _ambient_cache_put(key, frames)
 
 
 def _make_lantern_image(height: int = 26):
@@ -965,22 +1231,56 @@ class ApexAI:
         hdr.pack(fill=tk.X)
 
         # Left: official F1-style logo + bold ApexAI wordmark + caption.
+        # The logo and wordmark double as a "home" button — clicking
+        # either takes the user back to the predictions view (the
+        # last predicted race), much like a website logo.
         logo_img = _make_f1_logo(32) if HAS_PIL else None
         if logo_img is not None:
             self._hdr_logo_tk = ImageTk.PhotoImage(logo_img)
             self._tk_images.append(self._hdr_logo_tk)
-            tk.Label(hdr, image=self._hdr_logo_tk, bg=BG, bd=0).pack(
-                side=tk.LEFT, padx=(0, 14),
+            self._home_logo_lbl = tk.Label(
+                hdr, image=self._hdr_logo_tk, bg=BG, bd=0,
+                cursor="hand2",
             )
+            self._home_logo_lbl.pack(side=tk.LEFT, padx=(0, 14))
+            self._home_logo_lbl.bind("<Button-1>", lambda _e: self._go_home())
 
-        title_box = tk.Frame(hdr, bg=BG)
+        title_box = tk.Frame(hdr, bg=BG, cursor="hand2")
         title_box.pack(side=tk.LEFT, fill=tk.Y)
-        wmark = tk.Frame(title_box, bg=BG)
+        title_box.bind("<Button-1>", lambda _e: self._go_home())
+        wmark = tk.Frame(title_box, bg=BG, cursor="hand2")
         wmark.pack(anchor="w")
-        tk.Label(wmark, text="Apex", font=("Helvetica Neue", 24, "bold"),
-                 fg=F1_RED, bg=BG).pack(side=tk.LEFT)
-        tk.Label(wmark, text="AI", font=("Helvetica Neue", 24, "bold"),
-                 fg=WHITE, bg=BG).pack(side=tk.LEFT)
+        wmark.bind("<Button-1>", lambda _e: self._go_home())
+        self._home_apex_lbl = tk.Label(
+            wmark, text="Apex", font=("Helvetica Neue", 24, "bold"),
+            fg=F1_RED, bg=BG, cursor="hand2",
+        )
+        self._home_apex_lbl.pack(side=tk.LEFT)
+        self._home_apex_lbl.bind("<Button-1>", lambda _e: self._go_home())
+        self._home_ai_lbl = tk.Label(
+            wmark, text="AI", font=("Helvetica Neue", 24, "bold"),
+            fg=WHITE, bg=BG, cursor="hand2",
+        )
+        self._home_ai_lbl.pack(side=tk.LEFT)
+        self._home_ai_lbl.bind("<Button-1>", lambda _e: self._go_home())
+
+        # Subtle hover dim so the brand mark visibly reads as a button.
+        def _brand_hover(entering: bool):
+            if entering:
+                self._home_apex_lbl.configure(fg=GOLD_GLOW)
+                self._home_ai_lbl.configure(fg=GRAY)
+            else:
+                self._home_apex_lbl.configure(fg=F1_RED)
+                self._home_ai_lbl.configure(fg=WHITE)
+
+        for w in (self._home_apex_lbl, self._home_ai_lbl, wmark):
+            w.bind("<Enter>", lambda _e: _brand_hover(True))
+            w.bind("<Leave>", lambda _e: _brand_hover(False))
+        if hasattr(self, "_home_logo_lbl"):
+            self._home_logo_lbl.bind(
+                "<Enter>", lambda _e: _brand_hover(True))
+            self._home_logo_lbl.bind(
+                "<Leave>", lambda _e: _brand_hover(False))
         # Caption is built dynamically so it shows current date + season
         # progress, e.g. "F1 RACE PREDICTOR  ·  2026 SEASON  ·  ROUND 4 / 22
         #                 ·  MAY 18, 2026".  Populated lazily after the
@@ -1027,13 +1327,17 @@ class ApexAI:
                                          self._on_show_radio)
         self.btn_radio.pack(side=tk.LEFT, padx=(0, 6))
 
+        self.btn_replays = self._make_tab(ctrl, "Race Replays",
+                                           self._on_show_replays)
+        self.btn_replays.pack(side=tk.LEFT, padx=(0, 6))
+
         # Trailing refresh button is visually quieter (icon-style ↻).
         self.btn_refresh = self._make_tab(ctrl, "↻  Refresh",
                                            self._on_refresh, secondary=True)
         self.btn_refresh.pack(side=tk.LEFT, padx=(8, 0))
 
         self._all_btns = [self.btn_predict, self.btn_all, self.btn_viz,
-                          self.btn_radio, self.btn_refresh]
+                          self.btn_radio, self.btn_replays, self.btn_refresh]
 
         # ── Footer status bar (always visible, never truncated) ──
         # Packed at the BOTTOM of the window first so the body fills the
@@ -1068,6 +1372,11 @@ class ApexAI:
 
         # Team radio view (hidden initially)
         self.radio_frame = tk.Frame(self.root, bg=BG, padx=36, pady=8)
+
+        # Race replays view (hidden initially) – links to FullRaces.com
+        self.replays_frame = tk.Frame(self.root, bg=BG, padx=36, pady=8)
+        self._replays_built = False
+        self._replays_year = None
         self._radio_clips = []
         self._radio_clip_meta = []        # parallel: per-clip {lap, event, dt}
         self._radio_event_log = []        # raw f1radio event_log for the race
@@ -1335,12 +1644,46 @@ class ApexAI:
         r, g, b = (min(255, int(h[i:i+2], 16) + amt) for i in (0, 2, 4))
         return f"#{r:02x}{g:02x}{b:02x}"
 
+    @staticmethod
+    def _wheel_units(event) -> int:
+        """Cross-platform mouse-wheel delta normalisation.
+
+        Windows / X11 deliver `event.delta` in multiples of ±120
+        (one notch = 120) so we divide.  macOS delivers small
+        integers (typically ±1, occasionally ±3) so dividing by 120
+        always rounds to 0 — which is why scrolling silently did
+        nothing on macOS before.  Use the raw delta directly when
+        |delta| < 120, otherwise scale.
+        """
+        d = int(event.delta)
+        if abs(d) >= 120:
+            d = d // 120
+        return -d
+
     def _scroll(self, event):
         try:
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            self.canvas.yview_scroll(self._wheel_units(event), "units")
         except Exception:
             pass
         return "break"
+
+    def _bind_wheel_recursive(self, widget, scroll_fn):
+        """Bind `<MouseWheel>` on `widget` and every descendant.
+
+        Tk's wheel event fires on whichever widget the mouse is
+        currently over.  When a scrollable canvas is filled with many
+        child rows (e.g. the 96-race backtest table), hovering a row
+        means the wheel binding on the canvas itself is never
+        triggered.  This helper walks the subtree once and attaches
+        the same handler everywhere so the wheel always scrolls the
+        outer canvas.
+        """
+        try:
+            widget.bind("<MouseWheel>", scroll_fn, add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_wheel_recursive(child, scroll_fn)
 
     # -- Status --
     def _set_status(self, msg):
@@ -1581,15 +1924,19 @@ class ApexAI:
 
     # -- Backtest all races --
     def _on_all_races(self):
-        self.result = None
-        self._schedule = []
-        self._race_idx = -1
-        self._season_driver_pts = {}
-        self._season_team_pts = {}
+        # Preserve the existing prediction (`self.result`, `_schedule`,
+        # season point overlays) so the user can still flip to
+        # Visualization / Race Replays / Team Radio while the backtest
+        # is running and after it finishes.  The backtest produces its
+        # own result UI via `_show_all_races` and does not need to
+        # clobber the live prediction state.
         self._set_active_btn(self.btn_all)
         self._set_status("Backtesting every race...")
         self._clear()
-        self._show_empty("Running backtest on every race...\nThis takes a few minutes.")
+        self._show_empty(
+            "Running backtest on every race…\n"
+            "Takes about 30 seconds on a multi-core Mac."
+        )
 
         def work():
             r = run_predictions_all_races(progress_callback=self._set_status)
@@ -1604,29 +1951,104 @@ class ApexAI:
             self._show_empty(f"Error\n\n{r['error'][:300]}")
             return
 
-        self._set_status(f"Backtest: {r['correct']}/{r['total']} ({r['accuracy']:.1%})")
+        self._set_status(
+            f"Backtest: {r['correct']}/{r['total']} ({r['accuracy']:.1%})"
+        )
         self._clear()
 
-        card = tk.Frame(self.results, bg=BG_CARD, padx=20, pady=16)
-        card.configure(highlightbackground=BORDER, highlightthickness=1)
-        card.pack(fill=tk.X, pady=(0, 16))
+        # Group races by season so the user can scan year-by-year and
+        # the long table stays readable when scrolling.
+        races = r["all_races"]
+        by_year: dict[int, list] = {}
+        for race in races:
+            by_year.setdefault(int(race.get("year") or 0), []).append(race)
 
-        tk.Label(card, text=f"BACKTEST · {r['correct']}/{r['total']} correct ({r['accuracy']:.1%})", font=("Helvetica Neue", 11, "bold"), fg=GOLD, bg=BG_CARD).pack(anchor="w", pady=(0, 12))
+        years_sorted = sorted(by_year.keys())
 
-        # Header
-        hdr = tk.Frame(card, bg=BG_SURFACE, padx=10, pady=6)
-        hdr.pack(fill=tk.X, pady=(0, 4))
-        for txt, w in [("Year", 5), ("Race", 22), ("Predicted", 10), ("Actual", 10), ("", 3)]:
-            tk.Label(hdr, text=txt, font=("Helvetica Neue", 9, "bold"), fg=MUTED, bg=BG_SURFACE, width=w, anchor="w").pack(side=tk.LEFT, padx=2)
+        # Headline summary card
+        summary = tk.Frame(self.results, bg=BG_CARD, padx=20, pady=14)
+        summary.configure(highlightbackground=BORDER, highlightthickness=1)
+        summary.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(
+            summary,
+            text=f"BACKTEST · {r['correct']}/{r['total']} correct  "
+                 f"({r['accuracy']:.1%})",
+            font=("Helvetica Neue", 12, "bold"), fg=GOLD, bg=BG_CARD,
+        ).pack(anchor="w")
+        if years_sorted:
+            year_range = (
+                f"{years_sorted[0]}–{years_sorted[-1]}"
+                if years_sorted[0] != years_sorted[-1]
+                else str(years_sorted[0])
+            )
+            tk.Label(
+                summary,
+                text=f"Seasons covered: {year_range}  ·  "
+                     f"{len(races)} races  ·  scroll to view all",
+                font=("Helvetica Neue", 10), fg=MUTED, bg=BG_CARD,
+            ).pack(anchor="w", pady=(2, 0))
 
-        for race in r["all_races"]:
-            row = tk.Frame(card, bg=BG_CARD, padx=10, pady=4)
-            row.pack(fill=tk.X)
-            fg = GREEN if race["correct"] else RED
-            mark = "✓" if race["correct"] else "✗"
-            race_name = race.get("name", f"R{race['round']}")
-            for txt, w in [(str(race["year"]), 5), (race_name, 22), (race["predicted"], 10), (race["actual"], 10), (mark, 3)]:
-                tk.Label(row, text=txt, font=("Menlo", 10), fg=fg if txt == mark else GRAY, bg=BG_CARD, width=w, anchor="w").pack(side=tk.LEFT, padx=2)
+        # One card per season – each card has its own per-season hit
+        # rate so trends across years are obvious.
+        for yr in years_sorted:
+            year_races = by_year[yr]
+            year_correct = sum(1 for x in year_races if x["correct"])
+            year_total = len(year_races)
+            year_pct = (year_correct / year_total) if year_total else 0
+
+            card = tk.Frame(self.results, bg=BG_CARD, padx=18, pady=14)
+            card.configure(highlightbackground=BORDER, highlightthickness=1)
+            card.pack(fill=tk.X, pady=(0, 12))
+
+            head = tk.Frame(card, bg=BG_CARD)
+            head.pack(fill=tk.X, pady=(0, 8))
+            tk.Label(head, text=f"{yr} SEASON",
+                     font=("Helvetica Neue", 11, "bold"),
+                     fg=F1_RED, bg=BG_CARD).pack(side=tk.LEFT)
+            tk.Label(head,
+                     text=f"  ·  {year_correct}/{year_total} correct  "
+                          f"({year_pct:.0%})",
+                     font=("Helvetica Neue", 10),
+                     fg=MUTED, bg=BG_CARD).pack(side=tk.LEFT)
+
+            # Column headers
+            hdr = tk.Frame(card, bg=BG_SURFACE, padx=10, pady=6)
+            hdr.pack(fill=tk.X, pady=(0, 4))
+            for txt, w in [("Rd", 4), ("Race", 28),
+                           ("Predicted", 11), ("Actual", 11), ("", 3)]:
+                tk.Label(hdr, text=txt,
+                         font=("Helvetica Neue", 9, "bold"),
+                         fg=MUTED, bg=BG_SURFACE, width=w,
+                         anchor="w").pack(side=tk.LEFT, padx=2)
+
+            for race in sorted(year_races, key=lambda x: x.get("round", 0)):
+                row = tk.Frame(card, bg=BG_CARD, padx=10, pady=4)
+                row.pack(fill=tk.X)
+                mark_color = GREEN if race["correct"] else RED
+                mark = "✓" if race["correct"] else "✗"
+                race_name = race.get("name", f"R{race['round']}")
+                cells = [
+                    (f"R{int(race['round']):02d}", 4, GRAY),
+                    (race_name, 28, WHITE),
+                    (race["predicted"], 11, GRAY),
+                    (race["actual"], 11, GRAY),
+                    (mark, 3, mark_color),
+                ]
+                for txt, w, fg in cells:
+                    tk.Label(
+                        row, text=txt,
+                        font=("Menlo", 10), fg=fg, bg=BG_CARD,
+                        width=w, anchor="w",
+                    ).pack(side=tk.LEFT, padx=2)
+
+        # Wire mouse-wheel scrolling onto every newly-added row so
+        # the wheel keeps scrolling the outer canvas no matter where
+        # the cursor is.  Without this the wheel "dies" the moment
+        # the cursor crosses one of the 96+ row Frames.
+        self._bind_wheel_recursive(self.results, self._scroll)
+        # Snap back to the top so the user starts at the summary.
+        self.canvas.update_idletasks()
+        self.canvas.yview_moveto(0.0)
 
     # -- Shared helpers --
     def _driver_row(self, parent, rank, abbr, team, prob, highlight=False):
@@ -1814,12 +2236,40 @@ class ApexAI:
 
     # ── View switching ──
 
+    def _go_home(self):
+        """Header logo / wordmark click handler – returns to the
+        predictions view showing the last-predicted race.  Stops any
+        running animations and team-radio playback so the home view
+        is clean.
+        """
+        if getattr(self, "_radio_proc", None) or getattr(self, "_radio_sound", None):
+            try:
+                self._stop_radio()
+            except Exception:
+                pass
+        self._switch_to_view("predictions")
+        if self.result:
+            race = ""
+            nxt = self.result.get("next_race") or {}
+            last = self.result.get("last_race") or {}
+            if isinstance(nxt, dict):
+                race = nxt.get("name") or ""
+            if not race and isinstance(last, dict):
+                race = last.get("name") or ""
+            if race:
+                self._set_status(f"Showing prediction · {race}")
+            else:
+                self._set_status("Showing last prediction")
+        else:
+            self._set_status("No prediction yet — click Predict Next Race")
+
     def _switch_to_view(self, view):
         self._current_view = view
         self._anim_running = False
         self.body.pack_forget()
         self.viz_frame.pack_forget()
         self.radio_frame.pack_forget()
+        self.replays_frame.pack_forget()
         if view == "predictions":
             self.body.pack(fill=tk.BOTH, expand=True)
             self._set_active_btn(None)
@@ -1829,6 +2279,9 @@ class ApexAI:
         elif view == "radio":
             self.radio_frame.pack(fill=tk.BOTH, expand=True)
             self._set_active_btn(self.btn_radio)
+        elif view == "replays":
+            self.replays_frame.pack(fill=tk.BOTH, expand=True)
+            self._set_active_btn(self.btn_replays)
 
     def _on_show_viz(self):
         if self._current_view == "viz":
@@ -1850,6 +2303,22 @@ class ApexAI:
             return
         self._build_radio()
         self._switch_to_view("radio")
+
+    def _on_show_replays(self):
+        if self._current_view == "replays":
+            self._switch_to_view("predictions")
+            return
+        # Lazy-build: only construct the widget tree the first time
+        # the user opens the tab.  Subsequent toggles just re-show
+        # the cached widget tree, so flipping in/out is instant.
+        # Schedule loading inside `_build_replays` is dispatched to a
+        # background thread so the UI never freezes while waiting on
+        # disk / network – this prevents subsequent tab clicks from
+        # being lost while the first Replays click is loading.
+        if not self._replays_built:
+            self._build_replays()
+            self._replays_built = True
+        self._switch_to_view("replays")
 
     # ── Team Radio ──
 
@@ -2021,10 +2490,15 @@ class ApexAI:
         race_canvas.configure(yscrollcommand=race_sb.set)
         race_sb.pack(side=tk.RIGHT, fill=tk.Y)
         race_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def _race_wheel(e, c=race_canvas):
+            c.yview_scroll(self._wheel_units(e), "units")
+            return "break"
+
         for w in (race_canvas, race_inner):
-            w.bind("<MouseWheel>", lambda e, c=race_canvas: (
-                c.yview_scroll(int(-1 * (e.delta / 120)), "units"), "break"
-            )[-1])
+            w.bind("<MouseWheel>", _race_wheel)
+        self._race_canvas = race_canvas
+        self._race_wheel_handler = _race_wheel
 
         self._race_btns = []
         for yr, race in self.RADIO_RACES:
@@ -2102,11 +2576,13 @@ class ApexAI:
         self._clip_canvas.configure(yscrollcommand=clip_sb.set)
         clip_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self._clip_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        def _clip_wheel(e):
+            self._clip_canvas.yview_scroll(self._wheel_units(e), "units")
+            return "break"
+
         for w in (self._clip_canvas, self._clip_inner):
-            w.bind("<MouseWheel>", lambda e: (
-                self._clip_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-                "break"
-            )[-1])
+            w.bind("<MouseWheel>", _clip_wheel)
+        self._clip_wheel_handler = _clip_wheel
 
         self._radio_loading_lbl = tk.Label(self._clip_inner, text="Select a race from the left panel",
                                             font=("Helvetica Neue", 12), fg=MUTED, bg=BG_CARD,
@@ -2691,6 +3167,292 @@ class ApexAI:
             c.create_rectangle(x0, y0, x1, y1, fill=bar_color, outline="")
         self.root.after(33, self._radio_wave_tick)
 
+    # ── Race Replays (FullRaces.com) ──
+
+    # Friendly aliases so the search URL hits the way fullraces.com
+    # actually titles its uploads (e.g. "Sao Paulo" rather than "São
+    # Paulo", which trips up basic WordPress search).
+    REPLAY_RACE_ALIASES = {
+        "São Paulo Grand Prix": "Sao Paulo Grand Prix",
+        "Emilia Romagna Grand Prix": "Emilia Romagna Grand Prix",
+        "70th Anniversary Grand Prix": "70th Anniversary Grand Prix",
+    }
+
+    # The full set of session links FullRaces.com publishes per round.
+    # Keyword is what we feed into the WordPress `?s=` search so we
+    # land on the matching post for that round + year.
+    REPLAY_SESSIONS = [
+        ("Race",          "race"),
+        ("Qualifying",    "qualifying"),
+        ("Sprint",        "sprint"),
+        ("Sprint Quali",  "sprint qualifying"),
+        ("Practice",      "practice"),
+    ]
+
+    @staticmethod
+    def _replay_search_url(year: int, race_name: str, keyword: str) -> str:
+        """Build a FullRaces.com search URL for a given race + session.
+
+        Using the WordPress `?s=` query is more durable than guessing
+        the post slug — every upload's title contains the session
+        keyword + year + race name, so search hits the right post even
+        if the title casing or punctuation drifts.
+        """
+        race = ApexAIApp.REPLAY_RACE_ALIASES.get(race_name, race_name)
+        terms = f"{keyword} f1 {year} {race}".strip()
+        return "https://fullraces.com/?s=" + urllib.parse.quote_plus(terms)
+
+    def _open_replay(self, year: int, race_name: str, keyword: str):
+        url = self._replay_search_url(year, race_name, keyword)
+        try:
+            webbrowser.open(url, new=2)
+            self._set_status(
+                f"Opened FullRaces.com – {race_name} {year} ({keyword})"
+            )
+        except Exception as exc:
+            self._set_status(f"Could not open browser: {exc}")
+
+    def _build_replays(self):
+        """Render the Race Replays tab.  Schedule is fetched lazily
+        the first time the tab opens, then cached on the widget tree
+        until the next refresh."""
+        for w in self.replays_frame.winfo_children():
+            w.destroy()
+
+        # Header row
+        top = tk.Frame(self.replays_frame, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(top, text="RACE REPLAYS",
+                 font=("Helvetica Neue", 16, "bold"),
+                 fg=GOLD, bg=BG).pack(side=tk.LEFT)
+        tk.Label(top, text="Watch every session – powered by FullRaces.com",
+                 font=("Helvetica Neue", 11), fg=MUTED, bg=BG
+                 ).pack(side=tk.LEFT, padx=(16, 0), pady=(3, 0))
+
+        # Year selector lives on the right of the header.
+        right = tk.Frame(top, bg=BG)
+        right.pack(side=tk.RIGHT)
+
+        current_year = datetime.now().year
+        years = [str(y) for y in range(current_year, current_year - 8, -1)]
+        if self._replays_year is None:
+            self._replays_year = str(current_year)
+
+        tk.Label(right, text="SEASON",
+                 font=("Helvetica Neue", 9, "bold"),
+                 fg=MUTED, bg=BG).pack(side=tk.LEFT, padx=(0, 8))
+        self._replays_year_var = tk.StringVar(value=self._replays_year)
+        cb = ttk.Combobox(right, values=years, state="readonly",
+                          textvariable=self._replays_year_var, width=6,
+                          font=("Helvetica Neue", 11))
+        cb.pack(side=tk.LEFT)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._reload_replays())
+
+        # Quick link to the FullRaces home page.
+        home_btn = self._make_btn(right, "Open FullRaces.com",
+                                   BG_SURFACE, WHITE,
+                                   lambda: webbrowser.open(
+                                       "https://fullraces.com/", new=2),
+                                   border=BORDER)
+        home_btn.pack(side=tk.LEFT, padx=(12, 0))
+
+        tk.Frame(self.replays_frame, bg=F1_RED, height=2).pack(
+            fill=tk.X, pady=(2, 10))
+
+        # Scrollable race list.
+        body = tk.Frame(self.replays_frame, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        self._replays_canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(body, orient="vertical",
+                           command=self._replays_canvas.yview)
+        self._replays_inner = tk.Frame(self._replays_canvas, bg=BG)
+        self._replays_inner.bind(
+            "<Configure>",
+            lambda e: self._replays_canvas.configure(
+                scrollregion=self._replays_canvas.bbox("all")),
+        )
+        self._replays_canvas.create_window(
+            (0, 0), window=self._replays_inner, anchor="nw"
+        )
+        self._replays_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._replays_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def _wheel(e, c=self._replays_canvas):
+            c.yview_scroll(self._wheel_units(e), "units")
+            return "break"
+
+        for w in (self._replays_canvas, self._replays_inner):
+            w.bind("<MouseWheel>", _wheel)
+        self._replays_wheel_handler = _wheel
+
+        # Make the inner column stretch the full canvas width so each
+        # race row fills the available space instead of bunching up
+        # on the left.  Guarded with `find_all()` length check because
+        # the canvas may emit Configure events while it's empty (e.g.
+        # while it's being torn down or before the inner window is
+        # added) which would otherwise raise IndexError into Tk's
+        # event handler.
+        def _resize_inner(e):
+            items = self._replays_canvas.find_all()
+            if items:
+                self._replays_canvas.itemconfigure(items[0], width=e.width)
+
+        self._replays_canvas.bind("<Configure>", _resize_inner)
+
+        # Show a placeholder while the schedule loads in the background.
+        self._replays_loading_lbl = tk.Label(
+            self._replays_inner, text="Loading schedule…",
+            font=("Helvetica Neue", 11), fg=MUTED, bg=BG,
+        )
+        self._replays_loading_lbl.pack(anchor="w", pady=20)
+
+        self._fetch_replays_schedule(int(self._replays_year))
+
+    def _fetch_replays_schedule(self, year: int):
+        """Load the schedule on a worker thread so the UI never
+        freezes on the first Replays tab open.  When done, the
+        callback marshals back to the Tk thread via `after(0, ...)`.
+        """
+        def work():
+            try:
+                schedule = get_event_schedule_cached(year)
+                err = None
+            except Exception as exc:
+                schedule = None
+                err = exc
+            self.root.after(
+                0, lambda: self._populate_replays(year, schedule, err)
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _populate_replays(self, year, schedule, err):
+        """Tk-thread callback: render the year's races into the
+        already-built replays scroll container."""
+        # The user may have switched the year selector in the meantime –
+        # if so, ignore this stale result.
+        try:
+            if int(self._replays_year_var.get()) != year:
+                return
+        except Exception:
+            pass
+
+        # Wipe the loading placeholder / any prior render.
+        for w in self._replays_inner.winfo_children():
+            w.destroy()
+
+        if err is not None:
+            tk.Label(self._replays_inner,
+                     text=f"Could not load {year} schedule: {err}",
+                     font=("Helvetica Neue", 11), fg=MUTED, bg=BG
+                     ).pack(anchor="w", pady=20)
+            return
+
+        if schedule is None or schedule.empty:
+            tk.Label(self._replays_inner,
+                     text=f"No schedule available for {year}.",
+                     font=("Helvetica Neue", 11), fg=MUTED, bg=BG
+                     ).pack(anchor="w", pady=20)
+            return
+
+        rows = schedule.sort_values("RoundNumber").to_dict("records")
+        today = datetime.now().date()
+        for row in rows:
+            try:
+                rnd = int(row.get("RoundNumber") or 0)
+            except (TypeError, ValueError):
+                rnd = 0
+            name = str(row.get("EventName") or "Unknown Grand Prix")
+            ed = row.get("EventDate")
+            try:
+                if hasattr(ed, "date"):
+                    ev_date = ed.date()
+                else:
+                    ev_date = datetime.fromisoformat(str(ed)[:10]).date()
+            except Exception:
+                ev_date = None
+            self._replays_render_card(year, rnd, name, ev_date, today)
+
+        # Re-bind wheel on every newly-rendered card so scrolling
+        # works no matter which row the cursor is hovering.
+        if hasattr(self, "_replays_wheel_handler"):
+            self._bind_wheel_recursive(
+                self._replays_inner, self._replays_wheel_handler
+            )
+
+    def _reload_replays(self):
+        """Re-render the race list when the user changes the season –
+        loads the new year's schedule on a background thread so the
+        Combobox doesn't freeze the UI."""
+        try:
+            self._replays_year = self._replays_year_var.get()
+        except Exception:
+            return
+        for w in self._replays_inner.winfo_children():
+            w.destroy()
+        self._replays_loading_lbl = tk.Label(
+            self._replays_inner, text="Loading schedule…",
+            font=("Helvetica Neue", 11), fg=MUTED, bg=BG,
+        )
+        self._replays_loading_lbl.pack(anchor="w", pady=20)
+        self._fetch_replays_schedule(int(self._replays_year))
+
+    def _replays_render_card(self, year, rnd, name, ev_date, today):
+        """One card per round: round + race name on the left, session
+        buttons on the right.  Future races render greyed-out so it's
+        obvious which weekends don't have replays online yet."""
+        is_future = ev_date is not None and ev_date > today
+
+        card = tk.Frame(self._replays_inner, bg=BG_CARD,
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill=tk.X, pady=4)
+
+        inner = tk.Frame(card, bg=BG_CARD, padx=14, pady=10)
+        inner.pack(fill=tk.X)
+
+        # Left column: round badge + race title + date
+        left = tk.Frame(inner, bg=BG_CARD)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+
+        rnd_text = f"R{rnd:02d}" if rnd else "  "
+        tk.Label(left, text=rnd_text,
+                 font=("Helvetica Neue", 10, "bold"),
+                 fg=F1_RED, bg=BG_CARD, width=4
+                 ).pack(side=tk.LEFT, padx=(0, 12))
+
+        text_col = tk.Frame(left, bg=BG_CARD)
+        text_col.pack(side=tk.LEFT)
+        tk.Label(text_col, text=name,
+                 font=("Helvetica Neue", 12, "bold"),
+                 fg=WHITE, bg=BG_CARD, anchor="w"
+                 ).pack(anchor="w")
+        date_text = ev_date.strftime("%a %d %b %Y") if ev_date else "TBD"
+        if is_future:
+            date_text += "  ·  upcoming"
+        tk.Label(text_col, text=date_text,
+                 font=("Helvetica Neue", 9),
+                 fg=MUTED, bg=BG_CARD, anchor="w"
+                 ).pack(anchor="w")
+
+        # Right column: session buttons.  Disabled-look for upcoming
+        # rounds (still clickable — search may still find practice or
+        # qualifying clips for ongoing weekends).
+        right = tk.Frame(inner, bg=BG_CARD)
+        right.pack(side=tk.RIGHT)
+
+        for label, keyword in self.REPLAY_SESSIONS:
+            bg_c = BG_HOVER if not is_future else BG_SURFACE
+            fg_c = WHITE if not is_future else GRAY
+            border = BORDER
+            btn = self._make_btn(
+                right, label, bg_c, fg_c,
+                lambda y=year, n=name, k=keyword: self._open_replay(y, n, k),
+                border=border,
+            )
+            btn.pack(side=tk.LEFT, padx=4)
+
     # ── Track visualization ──
 
     def _build_viz(self):
@@ -3015,25 +3777,15 @@ class ApexAI:
                                  outline="#222230")
 
     def _s_water_edge(self, c, cw, ch, side, s):
-        depth = 0.12
-        col = "#0a1428"
-        if side == "bottom":
-            y0 = ch * (1 - depth)
-            c.create_rectangle(0, y0, cw, ch, fill=col, outline="")
-            for i, f in enumerate([0.3, 0.55, 0.8]):
-                c.create_line(cw * 0.05, y0 + depth * ch * f,
-                              cw * 0.95, y0 + depth * ch * f,
-                              fill="#12203a", width=1, dash=(15 + i * 8, 25))
-        elif side == "top":
-            y1 = ch * depth
-            c.create_rectangle(0, 0, cw, y1, fill=col, outline="")
-            for f in [0.3, 0.55, 0.8]:
-                c.create_line(cw * 0.05, y1 * f, cw * 0.95, y1 * f,
-                              fill="#12203a", width=1, dash=(20, 25))
-        elif side == "left":
-            c.create_rectangle(0, 0, cw * depth, ch, fill=col, outline="")
-        elif side == "right":
-            c.create_rectangle(cw * (1 - depth), 0, cw, ch, fill=col, outline="")
+        # The water edge used to paint a dark-blue rectangle (and ripple
+        # lines) along one side of the canvas to suggest a harbour or
+        # waterfront.  In practice it read as a thick blue *border*
+        # framing the visualisation, so the canvas now keeps a single
+        # uniform background colour.  The shimmer / sparkle particles
+        # configured for water-themed circuits (Monaco, Miami, Yas
+        # Marina, Baku, …) still convey the watery atmosphere via
+        # `sparkle_water` ambient items.
+        return
 
     def _s_mountain_range(self, c, cw, base_y, count, s):
         spacing = cw / (count + 1)
@@ -3162,26 +3914,16 @@ class ApexAI:
                       fill="#3a3a4a", outline="")
 
     def _s_yacht_harbor(self, c, cw, ch, count, s):
-        water_y = ch * 0.88
-        for i in range(count):
-            yx = cw * (0.2 + 0.6 * i / max(count, 1))
-            yy = water_y + 10 * s + (i * 7) % 3 * 5 * s
-            c.create_polygon(yx - 12 * s, yy, yx - 15 * s, yy - 4 * s,
-                             yx + 15 * s, yy - 4 * s, yx + 12 * s, yy,
-                             fill="#1a1a28", outline="#2a2a3a")
-            c.create_line(yx, yy - 4 * s, yx, yy - 20 * s,
-                          fill="#2a2a3a", width=1)
-            c.create_polygon(yx, yy - 18 * s, yx + 8 * s, yy - 6 * s,
-                             yx, yy - 6 * s,
-                             fill="#16162a", outline="#2a2a3a")
+        # Yachts only made sense floating on the water-edge rectangles
+        # (now disabled to keep the canvas a single colour), so this is
+        # a no-op too.
+        return
 
     def _s_lake(self, c, cx, cy, rw, rh):
-        c.create_oval(cx - rw, cy - rh, cx + rw, cy + rh,
-                      fill="#0a1428", outline="#122035", width=1)
-        for f in [0.4, 0.7]:
-            c.create_oval(cx - rw * f, cy - rh * f,
-                          cx + rw * f, cy + rh * f,
-                          fill="", outline="#122a3a", width=1, dash=(10, 15))
+        # Skipped for the same reason as `_s_water_edge` – the blue
+        # Albert Park lake silhouette inside the track conflicted with
+        # the goal of a uniform background.
+        return
 
     def _s_tower(self, c, x, y, s):
         c.create_polygon(x - 8 * s, y + 50 * s, x - 3 * s, y,
@@ -3245,13 +3987,42 @@ class ApexAI:
 
     def _draw_real_track(self, cw, ch, raw_pts, preds):
         canvas = self.track_canvas
-        # Tighter margin → the track fills more of the visible area, which
-        # is what the user means by "fit the UI better".  The 80px margin
-        # left obvious dead zones at the corners.
-        margin = max(48, int(min(cw, ch) * 0.06))
 
-        scaled = [(margin + x * (cw - 2 * margin),
-                    margin + y * (ch - 2 * margin)) for x, y in raw_pts]
+        # ── Track fitting ──
+        # Each circuit's raw points are authored in a roughly normalised
+        # space, but the *real* bounding box varies wildly between tracks
+        # (Baku and Spa are long and skinny, Red Bull Ring is squat).
+        # Stretching every track to fill an arbitrary canvas distorts the
+        # actual shape.  Instead, compute the points' real bbox, fit the
+        # bbox into the canvas with `min(scale_x, scale_y)` so aspect
+        # ratio is preserved, and centre it.
+        #
+        # We also reserve room for the *track surface itself* (`hw`) plus
+        # the kerb/border cushion (`+4`) so a corner that brushes the
+        # bbox edge doesn't get clipped by the canvas frame.
+        tw = max(28, min(48, int(min(cw, ch) * 0.045)))
+        hw = tw / 2
+
+        if not raw_pts:
+            return
+        xs = [x for (x, _y) in raw_pts]
+        ys = [y for (_x, y) in raw_pts]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        bw = max(1e-6, xmax - xmin)
+        bh = max(1e-6, ymax - ymin)
+
+        # Reserve space for the track surface and a small breathing
+        # margin on all four sides.
+        pad = int(hw + 6)
+        avail_w = max(80, cw - 2 * pad)
+        avail_h = max(80, ch - 2 * pad)
+        scale = min(avail_w / bw, avail_h / bh)
+
+        ox = pad + (avail_w - bw * scale) / 2 - xmin * scale
+        oy = pad + (avail_h - bh * scale) / 2 - ymin * scale
+
+        scaled = [(x * scale + ox, y * scale + oy) for (x, y) in raw_pts]
 
         # Drop point density: 500 → 200.  Each redraw pass through Tk
         # rasterises every line segment that overlaps a dirty rect, and the
@@ -3262,8 +4033,6 @@ class ApexAI:
         track = self._interpolate_track(scaled, 200)
         self._track_pts = track
         num = len(track)
-        tw = max(28, min(48, int(min(cw, ch) * 0.045)))
-        hw = tw / 2
 
         # Pre-compute per-point unit normals once.  Both the scene drawing and the
         # animation loop hit `_track_normal` many times per frame – caching avoids
@@ -3337,8 +4106,12 @@ class ApexAI:
             canvas.create_line(border, fill="#2a2a38", width=1.5)
 
         # ── Curvature analysis ──
+        # Cross-product magnitude of consecutive segment vectors gives a
+        # cheap proxy for local curvature.  A wider `step` smooths out
+        # interpolation noise so we don't see spurious "kinks" between
+        # adjacent straight points.
         curvatures = []
-        step = max(3, num // 150)
+        step = max(4, num // 100)
         for i in range(num):
             p_prev = track[(i - step) % num]
             p_cur = track[i]
@@ -3371,43 +4144,91 @@ class ApexAI:
                            fill=MUTED)
 
         # ── MOM zones — find the two longest straight stretches ──
-        low_curv_threshold = curv_sorted[num // 2] if num > 10 else 0
-        runs = []
-        run_start = None
-        for i in range(num * 2):
-            idx = i % num
-            if curvatures[idx] < low_curv_threshold:
-                if run_start is None:
-                    run_start = idx
-            else:
-                if run_start is not None:
-                    run_len = (idx - run_start) % num
-                    runs.append((run_start, run_len))
-                    run_start = None
-            if i >= num and run_start is not None:
-                run_len = (idx - run_start) % num
-                runs.append((run_start, run_len))
-                break
+        # Threshold: a point is "straight" if its curvature is below
+        # the 55th percentile.  The previous median threshold
+        # promoted slightly-less-curvy corners to MOM zones; this
+        # tightening keeps every track's actual straights eligible
+        # without becoming so strict that twisty circuits (Imola,
+        # Lusail) end up with no eligible points at all.
+        threshold_idx = int(num * 0.55)
+        low_curv_threshold = (
+            curv_sorted[threshold_idx] if num > 10 else 0
+        )
+        positions = [c < low_curv_threshold for c in curvatures]
 
-        runs_clean = [(s, l) for s, l in runs if l >= 12]
+        # Walk the loop starting from the *first non-straight point* so
+        # any straight that wraps the seam is captured contiguously.
+        # The previous version used `range(num * 2)` and computed a
+        # closing length of zero when the entire track passed the
+        # threshold — that effectively dropped the longest run.
+        runs = []
+        if all(positions):
+            runs.append((0, num))
+        elif any(positions):
+            start = next(i for i, p in enumerate(positions) if not p)
+            in_run = False
+            run_offset = 0
+            run_idx = 0
+            for offset in range(num + 1):
+                idx = (start + offset) % num
+                if offset < num and positions[idx]:
+                    if not in_run:
+                        in_run = True
+                        run_offset = offset
+                        run_idx = idx
+                else:
+                    if in_run:
+                        run_len = offset - run_offset
+                        if run_len > 0:
+                            runs.append((run_idx, run_len))
+                        in_run = False
+
+        # Only count straights long enough to actually overtake into.
+        # Scale the minimum with track length so we don't accept
+        # micro-segments that look like straights but only span a
+        # couple of interpolation steps.
+        min_run_len = max(10, num // 18)
+        runs_clean = [(s, l) for s, l in runs if l >= min_run_len]
         runs_clean.sort(key=lambda x: -x[1])
 
-        mom_placed = []
+        # Place up to 2 MOM zones.  We try a generous separation first
+        # and progressively relax it so a track with two distinct
+        # but adjacent straights (e.g. Sakhir's main + back straight)
+        # still gets both flagged instead of just one.
+        chosen = []
+        for sep in (num // 4, num // 6, num // 9):
+            chosen = []
+            for s, l in runs_clean:
+                mid = (s + l // 2) % num
+                if all(
+                    min(abs(mid - prev), num - abs(mid - prev)) >= sep
+                    for prev in chosen
+                ):
+                    chosen.append(mid)
+                    if len(chosen) >= 2:
+                        break
+            if len(chosen) >= 2:
+                break
+
+        # Render whichever ones we got (1 or 2).
+        chosen_set = set(chosen)
         for s, l in runs_clean:
             mid = (s + l // 2) % num
-            if all(min(abs(mid - prev), num - abs(mid - prev)) > num // 5 for prev in mom_placed):
-                mom_placed.append(mid)
-                zone_flat = []
-                for j in range(l):
-                    zone_flat.extend(track[(s + j) % num])
-                if len(zone_flat) >= 4:
-                    canvas.create_line(zone_flat, fill=GREEN, width=3, dash=(8, 4))
-                mnx, mny = self._normal_at(float(mid))
-                mp = self._pos_at(float(mid))
-                canvas.create_text(mp[0] + mnx * (hw + 16), mp[1] + mny * (hw + 16),
-                                   text="MOM", font=("Helvetica Neue", 8, "bold"), fill=GREEN)
-            if len(mom_placed) >= 2:
-                break
+            if mid not in chosen_set:
+                continue
+            chosen_set.discard(mid)
+            zone_flat = []
+            for j in range(l):
+                zone_flat.extend(track[(s + j) % num])
+            if len(zone_flat) >= 4:
+                canvas.create_line(zone_flat, fill=GREEN, width=3, dash=(8, 4))
+            mnx, mny = self._normal_at(float(mid))
+            mp = self._pos_at(float(mid))
+            canvas.create_text(mp[0] + mnx * (hw + 16),
+                               mp[1] + mny * (hw + 16),
+                               text="MOM",
+                               font=("Helvetica Neue", 8, "bold"),
+                               fill=GREEN)
 
         # ── Center podium with race trophy ──
         xs = [p[0] for p in track]
@@ -3415,121 +4236,185 @@ class ApexAI:
         cx = (min(xs) + max(xs)) / 2
         cy = (min(ys) + max(ys)) / 2
 
-        # The redesigned podium card features a procedural gold trophy on
-        # the left, with the winner + P2/P3 stack on the right.  Reads as
-        # a broadcast-graphic "winner's podium" presentation card.
+        # The redesigned podium card is a full broadcast-style podium with
+        # three trophies — silver (P2, left), gold (P1, centre, taller and
+        # framed by a laurel wreath) and bronze (P3, right) — sitting on
+        # top of physical "podium step" pedestals stamped with their
+        # finishing position.  Each pedestal carries the driver's
+        # abbreviation in their team's livery colour and the predicted
+        # win share, so the card alone tells the entire story.
         #
         # All podium items get a "podium" tag so we can `tag_raise` them
         # in one shot after the driver labels are created – the card
         # should always be the topmost layer so transient driver-card
         # labels never partly obscure the winner readout.
-        card_w, card_h = 280, 140
-        x0, y0 = cx - card_w / 2, cy - 70
-        x1, y1 = cx + card_w / 2, cy + card_h - 70
+        card_w, card_h = 300, 168
+        x0, y0 = cx - card_w / 2, cy - card_h / 2
+        x1, y1 = cx + card_w / 2, cy + card_h / 2
         PT = "podium"
 
-        # Soft glow halo so the card lifts off the background.
-        for off, alpha_color in ((6, "#180404"), (3, "#240608")):
+        # Soft drop-shadow halo so the card lifts off the background.
+        for off, alpha_color in ((6, "#0a0203"), (4, "#160505"), (2, "#240608")):
             canvas.create_rectangle(
                 x0 - off, y0 - off, x1 + off, y1 + off,
                 outline=alpha_color, width=1, tags=(PT,),
             )
-        # Card body + accent rule on top.
+        # Card body + thin red accent rule on top.
         canvas.create_rectangle(x0, y0, x1, y1,
                                 fill="#0d0d0e", outline=F1_RED, width=1,
                                 tags=(PT,))
         canvas.create_rectangle(x0, y0, x1, y0 + 3,
                                 fill=F1_RED, outline="", tags=(PT,))
 
-        # Header strip
+        # Header strip — small red label, then circuit name + subtitle.
         canvas.create_text(
-            cx, y0 + 16,
-            text=self._viz_circuit.upper(),
-            font=("Helvetica Neue", 9, "bold"),
-            fill=GRAY, tags=(PT,),
+            x0 + 12, y0 + 14,
+            text="NEXT RACE",
+            font=("Helvetica Neue", 7, "bold"),
+            fill=F1_RED, anchor="w", tags=(PT,),
         )
         canvas.create_text(
-            cx, y0 + 30,
-            text="PREDICTED PODIUM  ·  WINNER'S TROPHY",
+            cx, y0 + 14,
+            text=self._viz_circuit.upper(),
+            font=("Helvetica Neue", 9, "bold"),
+            fill=WHITE, tags=(PT,),
+        )
+        canvas.create_text(
+            cx, y0 + 28,
+            text="PREDICTED PODIUM",
             font=("Helvetica Neue", 7, "bold"),
             fill=MUTED, tags=(PT,),
         )
 
-        # Trophy artwork on the left
-        trophy_h = 78
-        if HAS_PIL:
-            trophy_img = _make_trophy_image(trophy_h)
-            if trophy_img is not None:
-                tk_trophy = ImageTk.PhotoImage(trophy_img)
-                self._tk_images.append(tk_trophy)
-                self._viz_trophy_tk = tk_trophy
-                canvas.create_image(
-                    x0 + 14 + trophy_img.size[0] / 2,
-                    y0 + 40 + trophy_img.size[1] / 2,
-                    image=tk_trophy, anchor="center", tags=(PT,),
-                )
-
-        # Right column: P1 hero block + P2/P3 split
-        right_x = x0 + 105
-        right_w = card_w - 110
-
-        p1 = preds[0]
-        canvas.create_text(
-            right_x, y0 + 50,
-            text="WINNER",
-            font=("Helvetica Neue", 7, "bold"),
-            fill=GOLD_GLOW,
-            anchor="w", tags=(PT,),
-        )
-        canvas.create_text(
-            right_x, y0 + 70,
-            text=p1["abbreviation"],
-            font=("Helvetica Neue", 22, "bold"),
-            fill=tc(p1["team"]),
-            anchor="w", tags=(PT,),
-        )
-        canvas.create_text(
-            right_x + 70, y0 + 73,
-            text=f"{p1['probability']*100:.1f}%",
-            font=("Helvetica Neue", 12, "bold"),
-            fill=WHITE,
-            anchor="w", tags=(PT,),
-        )
-        canvas.create_text(
-            right_x, y0 + 92,
-            text=p1["team"],
-            font=("Helvetica Neue", 8),
-            fill=MUTED,
-            anchor="w", tags=(PT,),
-        )
-
+        # ── Three-trophy podium layout ──
+        # P2 left, P1 centre (tallest), P3 right.  Trophy heights mirror
+        # the step heights so the silhouettes match a real broadcast
+        # podium.
+        positions = []
+        if len(preds) >= 1:
+            positions.append(("gold",   1, preds[0]))
+        if len(preds) >= 2:
+            positions.insert(0, ("silver", 2, preds[1]))
         if len(preds) >= 3:
-            p2, p3 = preds[1], preds[2]
-            # Subtle separator above P2/P3.
-            canvas.create_line(
-                right_x, y0 + 105, x1 - 14, y0 + 105,
-                fill="#2a1216", width=1, tags=(PT,),
+            positions.append(("bronze", 3, preds[2]))
+
+        # Three-column layout: silver / gold / bronze
+        n_cols = max(1, len(positions))
+        col_w = (card_w - 24) / n_cols  # 12px padding either side
+
+        # Step heights per tier — taller centre step is the gold
+        # winner's box.  Trophy height matches so it visually scales
+        # with the podium step.
+        step_for_tier = {"gold": 46, "silver": 34, "bronze": 26}
+        trophy_for_tier = {"gold": 70, "silver": 54, "bronze": 44}
+
+        steps_baseline = y1 - 16  # bottom of the steps
+        for col_idx, (tier, rank, p) in enumerate(positions):
+            col_cx = x0 + 12 + col_w * (col_idx + 0.5)
+            step_h = step_for_tier[tier]
+            step_top = steps_baseline - step_h
+            step_w = col_w * 0.78
+            sx0 = col_cx - step_w / 2
+            sx1 = col_cx + step_w / 2
+
+            # Pedestal — solid charcoal with a subtle gradient suggested
+            # by a brighter top edge.
+            canvas.create_rectangle(
+                sx0, step_top, sx1, steps_baseline,
+                fill=BG_CARD, outline=BORDER, width=1, tags=(PT,),
             )
-            split = (right_w) / 2
-            for col, p, pos_label in (
-                (0, p2, "P2"),
-                (1, p3, "P3"),
-            ):
-                col_x = right_x + col * split
-                canvas.create_text(
-                    col_x, y0 + 118,
-                    text=f"{pos_label}  {p['abbreviation']}",
-                    font=("Helvetica Neue", 10, "bold"),
-                    fill=tc(p["team"]),
-                    anchor="w", tags=(PT,),
-                )
-                canvas.create_text(
-                    col_x, y0 + 132,
-                    text=f"{p['probability']*100:.1f}%",
-                    font=("Helvetica Neue", 8),
-                    fill=MUTED,
-                    anchor="w", tags=(PT,),
-                )
+            canvas.create_rectangle(
+                sx0, step_top, sx1, step_top + 3,
+                fill=BG_HOVER, outline="", tags=(PT,),
+            )
+            # Position numeral big on the front of the step.
+            tier_color_for_num = {
+                "gold":   "#f0c352",
+                "silver": "#c8ced8",
+                "bronze": "#c67c3a",
+            }[tier]
+            canvas.create_text(
+                col_cx, step_top + step_h / 2 + 3,
+                text=str(rank),
+                font=("Helvetica Neue", 18, "bold"),
+                fill=tier_color_for_num, tags=(PT,),
+            )
+
+            # Trophy + (gold only) laurel wreath sitting on the step.
+            trophy_h = trophy_for_tier[tier]
+            trophy_cx = col_cx
+            trophy_cy = step_top - trophy_h / 2 + 4
+
+            if HAS_PIL:
+                if tier == "gold":
+                    laurel = _make_laurel_image(
+                        int(col_w * 0.92), trophy_h + 14
+                    )
+                    if laurel is not None:
+                        tk_laurel = ImageTk.PhotoImage(laurel)
+                        self._tk_images.append(tk_laurel)
+                        canvas.create_image(
+                            trophy_cx, trophy_cy + 4,
+                            image=tk_laurel, anchor="center", tags=(PT,),
+                        )
+
+                trophy_img = _make_trophy_image(trophy_h, tier=tier)
+                if trophy_img is not None:
+                    tk_trophy = ImageTk.PhotoImage(trophy_img)
+                    self._tk_images.append(tk_trophy)
+                    if tier == "gold":
+                        self._viz_trophy_tk = tk_trophy
+                    canvas.create_image(
+                        trophy_cx, trophy_cy,
+                        image=tk_trophy, anchor="center", tags=(PT,),
+                    )
+
+                # A few sparkle highlights around the gold trophy so the
+                # winner's slot reads as a real "celebration" beat.
+                if tier == "gold":
+                    sparkle = _make_sparkle_image(11)
+                    if sparkle is not None:
+                        tk_spark = ImageTk.PhotoImage(sparkle)
+                        self._tk_images.append(tk_spark)
+                        for sx, sy in (
+                            (trophy_cx - trophy_h * 0.34, trophy_cy - trophy_h * 0.30),
+                            (trophy_cx + trophy_h * 0.36, trophy_cy - trophy_h * 0.10),
+                            (trophy_cx + trophy_h * 0.20, trophy_cy - trophy_h * 0.42),
+                        ):
+                            canvas.create_image(
+                                sx, sy, image=tk_spark,
+                                anchor="center", tags=(PT,),
+                            )
+
+            # Driver readout: abbreviation in team livery + win share.
+            team_color = tc(p["team"])
+            abbr_y = steps_baseline + 10
+            canvas.create_text(
+                col_cx, abbr_y,
+                text=p["abbreviation"],
+                font=("Helvetica Neue", 11 if tier == "gold" else 10, "bold"),
+                fill=team_color, tags=(PT,),
+            )
+            canvas.create_text(
+                col_cx, abbr_y + 12,
+                text=f"{p['probability']*100:.1f}%",
+                font=("Helvetica Neue", 8, "bold"),
+                fill=GOLD_GLOW if tier == "gold" else WHITE,
+                tags=(PT,),
+            )
+
+        # WINNER caption above the centre step so the eye lands on the
+        # gold trophy first.
+        if positions:
+            for tier, _rank, _p in positions:
+                if tier == "gold":
+                    canvas.create_text(
+                        cx, y0 + 44,
+                        text="WINNER",
+                        font=("Helvetica Neue", 7, "bold"),
+                        fill=GOLD_GLOW, tags=(PT,),
+                    )
+                    break
 
         # ── Animation — only top 8 drivers for performance ──
         max_anim = min(8, len(preds))
@@ -3666,10 +4551,13 @@ class ApexAI:
         "Monaco":           [("sparkle_water", 8), ("sun", 1)],
         # Barcelona · sun-baked Catalan summer
         "Barcelona-Catalunya": [("sun", 1), ("leaf", 5)],
-        # Canada · falling maples beside the St Lawrence
-        "Circuit Gilles Villeneuve": [("leaf", 8), ("sparkle_water", 3)],
+        # Canada · iconic 11-point maple leaves drifting down the
+        # tree-lined Île Notre-Dame, with St Lawrence shimmer underneath.
+        "Circuit Gilles Villeneuve": [("maple", 9), ("sparkle_water", 3)],
         # Spielberg · Austrian sky (Alps already in SCENES)
         "Red Bull Ring":    [("seagull", 2), ("leaf", 3)],
+        # Hungary · sunflower-field summer (golden leaves + warm sun)
+        "Hungaroring":      [("leaf", 6), ("sun", 1)],
         # Silverstone · classic British rain
         "Silverstone":      [("rain", 12)],
         # Spa · Ardennes downpour (forest already in SCENES)
@@ -3857,6 +4745,39 @@ class ApexAI:
                         "phase": _rng.uniform(0, 6.28),
                         "speed": _rng.uniform(0.03, 0.06),
                         "amp": _rng.uniform(4, 9),
+                    })
+
+                # ── Canadian maple leaves (Circuit Gilles Villeneuve) ──
+                # A pre-rendered set of 6 rotation frames lets every leaf
+                # tumble realistically as it falls without paying the cost
+                # of a per-frame PIL.Image.rotate.
+                elif atype == "maple":
+                    if not HAS_PIL:
+                        continue
+                    base_size = int(_rng.uniform(14, 22))
+                    frames = _maple_leaf_rotation_frames(base_size, 6)
+                    if not frames:
+                        continue
+                    tk_frames = [ImageTk.PhotoImage(f) for f in frames]
+                    self._tk_images.extend(tk_frames)
+
+                    mx = _rng.uniform(20, cw - 20)
+                    my = _rng.uniform(-30, ch * 0.4)
+                    iid = canvas.create_image(
+                        mx, my, image=tk_frames[0], anchor="center",
+                    )
+                    self._scene_items.append({
+                        "type": "maple", "id": iid,
+                        "x": mx, "y": my,
+                        "vx": _rng.uniform(-0.4, 0.4),
+                        "vy": _rng.uniform(0.5, 1.0),
+                        "sway": _rng.uniform(0, 6.28),
+                        "rot_speed": _rng.uniform(0.05, 0.13),
+                        "rot_phase": _rng.uniform(0, 6.28),
+                        "frames": tk_frames,
+                        "frame_count": len(tk_frames),
+                        "cur_frame": 0,
+                        "cw": cw, "ch": ch,
                     })
 
                 # ── Falling leaves (autumn red/gold/green) ──
@@ -4148,6 +5069,25 @@ class ApexAI:
                 coords(item["id"],
                        item["x"] - s * stretch, item["y"] - s * 0.55,
                        item["x"] + s * stretch, item["y"] + s * 0.55)
+
+            elif t == "maple":
+                # Drift + sway like a leaf, but tumble by cycling through
+                # pre-rendered rotation frames instead of stretching.
+                item["x"] += (item["vx"] + sin(item["sway"] + frame * 0.04) * 0.55) * dt_scale
+                item["y"] += item["vy"] * dt_scale
+                if item["y"] > item["ch"] + 14:
+                    item["y"] = -14
+                    item["x"] = self._rng.uniform(20, item["cw"] - 20)
+                coords(item["id"], item["x"], item["y"])
+                # Index into the rotation frames; only itemconfig when
+                # the frame index actually changes so we don't generate
+                # unnecessary canvas dirty-rects every tick.
+                fi = int(
+                    (item["rot_phase"] + frame * item["rot_speed"])
+                ) % item["frame_count"]
+                if fi != item["cur_frame"]:
+                    item["cur_frame"] = fi
+                    itemcfg(item["id"], image=item["frames"][fi])
 
             elif t == "confetti":
                 # Falling confetti with a swirling horizontal drift and a
