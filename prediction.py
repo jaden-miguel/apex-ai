@@ -40,7 +40,7 @@ fastf1.Cache.enable_cache(str(CACHE_DIR))
 # Bump this string whenever the feature schema or training pipeline changes – it
 # is folded into the cache fingerprint so old `model_cache.pkl` files are
 # invalidated automatically.
-MODEL_VERSION = "v4_2026_midseason"
+MODEL_VERSION = "v5_2026_recency"
 
 # ---------------------------------------------------------------------------
 # Schedule cache (massive speedup)
@@ -729,6 +729,44 @@ def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
         lambda s: s.shift(1).expanding().mean()
     ).fillna(df["TeamRecentForm"]).fillna(10.0)
 
+    # ------------------------------------------------------------------
+    # Season-to-date championship points (leak-free: excludes the current
+    # round entirely).  The existing DriverPointsBefore / TeamPointsBefore
+    # are *career* cumulative sums, which mostly encode "is a veteran with
+    # a good career" — the current season's standings are a far sharper
+    # signal for who is winning races under *this* year's regulations.
+    # ------------------------------------------------------------------
+    df["SeasonPointsBefore"] = (
+        df.groupby(["Year", "Abbreviation"])["Points"].cumsum() - df["Points"]
+    ).fillna(0.0)
+
+    # Team version must be built from per-round totals so a driver's row
+    # never includes the teammate's points from the *same* race.
+    if "TeamSeasonPointsBefore" in df.columns:
+        df = df.drop(columns=["TeamSeasonPointsBefore"])
+    team_rounds = (
+        df.groupby(["Year", "TeamName", "Round"], as_index=False)["Points"].sum()
+        .sort_values(["Year", "TeamName", "Round"])
+    )
+    team_rounds["TeamSeasonPointsBefore"] = (
+        team_rounds.groupby(["Year", "TeamName"])["Points"].cumsum()
+        - team_rounds["Points"]
+    )
+    df = df.merge(
+        team_rounds[["Year", "TeamName", "Round", "TeamSeasonPointsBefore"]],
+        on=["Year", "TeamName", "Round"], how="left",
+    )
+    df["TeamSeasonPointsBefore"] = df["TeamSeasonPointsBefore"].fillna(0.0)
+
+    # Racecraft: average grid→finish delta over the last 5 races.  Positive
+    # means the driver habitually gains places on Sunday; a strong
+    # discriminator between "qualifies well" and "races well".
+    df["_pos_gain"] = df["GridPosition"] - df["Position"]
+    df["RecentPosGain"] = df.groupby("Abbreviation")["_pos_gain"].transform(
+        lambda s: s.shift(1).rolling(5, min_periods=1).mean()
+    ).fillna(0.0)
+    df.drop(columns=["_pos_gain"], inplace=True)
+
     return df
 
 
@@ -758,6 +796,8 @@ _ROLLING_COLS = [
     "DriverExperience", "HeadToHead",
     "TeamRecentForm",
     "DriverCircuitAvg", "TeamCircuitAvg",
+    "SeasonPointsBefore", "TeamSeasonPointsBefore",
+    "RecentPosGain",
 ]
 
 
@@ -809,6 +849,14 @@ def get_lineup_for_next_round(df: pd.DataFrame, next_year: int, features: list,
     driver_pts_by_abbr = df.groupby("Abbreviation")["Points"].sum()
     lineup["DriverPointsBefore"] = lineup["Abbreviation"].map(driver_pts_by_abbr).fillna(0)
 
+    # Season-to-date standings for the season being predicted.  If the
+    # season hasn't started yet these are all zero, which is correct.
+    season_df = df[df["Year"] == next_year]
+    season_driver_pts = season_df.groupby("Abbreviation")["Points"].sum()
+    season_team_pts = season_df.groupby("TeamName")["Points"].sum()
+    lineup["SeasonPointsBefore"] = lineup["Abbreviation"].map(season_driver_pts).fillna(0)
+    lineup["TeamSeasonPointsBefore"] = lineup["TeamName"].map(season_team_pts).fillna(0)
+
     if next_year == 2026:
         team_totals = _team_points_with_lineage(df)
         lineup["TeamPointsBefore"] = lineup["TeamName"].map(team_totals).fillna(0)
@@ -836,6 +884,9 @@ def get_lineup_for_next_round(df: pd.DataFrame, next_year: int, features: list,
         lineup.loc[idx, "RecentAvgGrid"] = last5["GridPosition"].mean()
         lineup.loc[idx, "RecentWinRate"] = (last_rows["Position"] == 1).mean()
         lineup.loc[idx, "RecentPodiumRate"] = (last_rows["Position"] <= 3).mean()
+        lineup.loc[idx, "RecentPosGain"] = (
+            (last5["GridPosition"] - last5["Position"]).mean()
+        )
         lineup.loc[idx, "DriverExperience"] = float(len(drv))
         lineup.loc[idx, "HeadToHead"] = (
             drv["HeadToHead"].iloc[-1] if "HeadToHead" in drv.columns else 0.5
@@ -889,10 +940,12 @@ def get_lineup_for_next_round(df: pd.DataFrame, next_year: int, features: list,
     defaults = {
         "RecentAvgPos": 10.0, "RecentAvgGrid": 10.0,
         "RecentWinRate": 0.0, "RecentPodiumRate": 0.0,
+        "RecentPosGain": 0.0,
         "DNFRate": 0.10,
         "DriverExperience": 0.0, "HeadToHead": 0.5,
         "TeamRecentForm": 10.0,
         "DriverCircuitAvg": 10.0, "TeamCircuitAvg": 10.0,
+        "SeasonPointsBefore": 0.0, "TeamSeasonPointsBefore": 0.0,
     }
     for col, default in defaults.items():
         if col not in lineup.columns:
@@ -906,8 +959,10 @@ FEATURES = [
     "Abbreviation", "TeamName",
     "GridPosition", "DriverNumber",
     "DriverPointsBefore", "TeamPointsBefore",
+    "SeasonPointsBefore", "TeamSeasonPointsBefore",
     "RecentAvgPos", "RecentAvgGrid",
     "RecentWinRate", "RecentPodiumRate",
+    "RecentPosGain",
     "DNFRate",
     "DriverExperience", "HeadToHead", "TeamRecentForm",
     "DriverCircuitAvg", "TeamCircuitAvg",
@@ -1044,6 +1099,26 @@ def _winner_sample_weights(y) -> np.ndarray:
     return w
 
 
+# Per-year decay applied to training rows.  The 2026 regulations (50/50
+# hybrid power split, new aero, Cadillac + Audi entries) changed the
+# competitive order enough that a 2022 result says much less about who wins
+# next weekend than a 2026 result does.  0.85^Δyear keeps older seasons in
+# the mix (a 2022 row still carries ~52% weight) while letting the current
+# season dominate the gradient.
+_RECENCY_DECAY = 0.85
+
+
+def _training_sample_weights(train_df) -> np.ndarray:
+    """Combined per-row training weights: winner-class balancing (see
+    `_winner_sample_weights`) multiplied by a recency decay so recent
+    seasons — raced under the current regulations — drive the fit."""
+    w = _winner_sample_weights(train_df["Winner"])
+    years = pd.to_numeric(train_df["Year"], errors="coerce").to_numpy(dtype=float)
+    max_year = np.nanmax(years) if len(years) else 0.0
+    age = np.clip(max_year - np.nan_to_num(years, nan=max_year), 0.0, None)
+    return w * np.power(_RECENCY_DECAY, age)
+
+
 def _softmax_normalize(raw_probs: np.ndarray, temperature: float = 1.2) -> np.ndarray:
     """Convert raw per-driver "is this a winner?" probabilities into a
     proper distribution over the field that sums to 1.
@@ -1133,9 +1208,9 @@ def run_predictions(progress_callback=None, target_year=2026):
         if best_model is None:
             report("Training model...")
             model = build_model()
-            # Strongly upweight winner rows so the imbalanced positive class
-            # actually drives the gradient updates.
-            sw = _winner_sample_weights(train_df["Winner"])
+            # Upweight winner rows (class imbalance) and recent seasons
+            # (regulation relevance) so the gradient reflects both.
+            sw = _training_sample_weights(train_df)
             model.fit(
                 train_df[features], train_df["Winner"],
                 classifier__sample_weight=sw,
@@ -1292,9 +1367,11 @@ def run_predictions(progress_callback=None, target_year=2026):
                 for col in [
                     "RecentAvgPos", "RecentAvgGrid",
                     "RecentWinRate", "RecentPodiumRate",
+                    "RecentPosGain",
                     "DNFRate",
                     "DriverExperience", "HeadToHead", "TeamRecentForm",
                     "DriverCircuitAvg", "TeamCircuitAvg",
+                    "SeasonPointsBefore", "TeamSeasonPointsBefore",
                     "PUBatteryScore", "PUICEScore",
                 ]
                 if col in lineup.columns
@@ -1349,10 +1426,12 @@ def predict_with_standings(model, features, base_lineup, driver_pts, team_pts,
     defaults = {
         "RecentAvgPos": 10.0, "RecentAvgGrid": 10.0,
         "RecentWinRate": 0.0, "RecentPodiumRate": 0.0,
+        "RecentPosGain": 0.0,
         "DNFRate": 0.10,
         "DriverExperience": 0.0, "HeadToHead": 0.5,
         "TeamRecentForm": 10.0,
         "DriverCircuitAvg": 10.0, "TeamCircuitAvg": 10.0,
+        "SeasonPointsBefore": 0.0, "TeamSeasonPointsBefore": 0.0,
     }
     for col in features:
         if col not in lineup.columns:
@@ -1390,7 +1469,7 @@ def _backtest_one_race(args):
         return None
 
     model = build_model_fast()
-    sw = _winner_sample_weights(train_df["Winner"])
+    sw = _training_sample_weights(train_df)
     model.fit(
         train_df[features], train_df["Winner"],
         classifier__sample_weight=sw,
