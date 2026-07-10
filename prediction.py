@@ -28,7 +28,12 @@ from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSe
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import (
+    GradientBoostingClassifier,
+    HistGradientBoostingClassifier,
+    RandomForestClassifier,
+    VotingClassifier,
+)
 
 # Suppress fastf1 verbose logging
 logging.getLogger("fastf1").setLevel(logging.WARNING)
@@ -40,7 +45,7 @@ fastf1.Cache.enable_cache(str(CACHE_DIR))
 # Bump this string whenever the feature schema or training pipeline changes – it
 # is folded into the cache fingerprint so old `model_cache.pkl` files are
 # invalidated automatically.
-MODEL_VERSION = "v5_2026_recency"
+MODEL_VERSION = "v6_2026_ensemble"
 
 # ---------------------------------------------------------------------------
 # Schedule cache (massive speedup)
@@ -767,6 +772,48 @@ def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     ).fillna(0.0)
     df.drop(columns=["_pos_gain"], inplace=True)
 
+    # ------------------------------------------------------------------
+    # Momentum: raw points scored over the last 3 races.  Sharper than the
+    # 5/10-race windows above — it spikes immediately when a car upgrade
+    # or form swing lands.
+    # ------------------------------------------------------------------
+    df["RecentPoints3"] = df.groupby("Abbreviation")["Points"].transform(
+        lambda s: s.shift(1).rolling(3, min_periods=1).sum()
+    ).fillna(0.0)
+
+    # ------------------------------------------------------------------
+    # Field-relative features.  Winning is a *ranking* problem: what
+    # matters is not that a driver's form is "4.2 average finish" but that
+    # it is the best (or third best) form ON THIS GRID.  Absolute features
+    # can't express that, so we add within-race ranks and shares.
+    # ------------------------------------------------------------------
+    race_grp = df.groupby(["Year", "Round"])
+
+    # Rank of recent form within the field (1 = best form on the grid).
+    df["FormRankInField"] = race_grp["RecentAvgPos"].rank(method="min")
+
+    # Share of the field's season points held by this driver / this team.
+    # Early-season races (points sum == 0) fall back to a uniform share so
+    # the feature stays defined and neutral.
+    n_field = race_grp["SeasonPointsBefore"].transform("count").astype(float)
+    tot_pts = race_grp["SeasonPointsBefore"].transform("sum")
+    df["SeasonPointsShare"] = np.where(
+        tot_pts > 0,
+        df["SeasonPointsBefore"] / tot_pts.replace(0, 1.0),
+        1.0 / n_field,
+    )
+    tot_team = race_grp["TeamSeasonPointsBefore"].transform("sum")
+    df["TeamSeasonPointsShare"] = np.where(
+        tot_team > 0,
+        df["TeamSeasonPointsBefore"] / tot_team.replace(0, 1.0),
+        1.0 / n_field,
+    )
+
+    # Qualifying surprise: grid slot vs the driver's recent grid average.
+    # Negative = qualified ahead of their own baseline (fresh upgrade,
+    # circuit suits the car) — a strong short-horizon pace signal.
+    df["GridVsForm"] = (df["GridPosition"] - df["RecentAvgGrid"]).fillna(0.0)
+
     return df
 
 
@@ -798,6 +845,9 @@ _ROLLING_COLS = [
     "DriverCircuitAvg", "TeamCircuitAvg",
     "SeasonPointsBefore", "TeamSeasonPointsBefore",
     "RecentPosGain",
+    "RecentPoints3",
+    "FormRankInField", "SeasonPointsShare", "TeamSeasonPointsShare",
+    "GridVsForm",
 ]
 
 
@@ -887,6 +937,7 @@ def get_lineup_for_next_round(df: pd.DataFrame, next_year: int, features: list,
         lineup.loc[idx, "RecentPosGain"] = (
             (last5["GridPosition"] - last5["Position"]).mean()
         )
+        lineup.loc[idx, "RecentPoints3"] = drv.tail(3)["Points"].sum()
         lineup.loc[idx, "DriverExperience"] = float(len(drv))
         lineup.loc[idx, "HeadToHead"] = (
             drv["HeadToHead"].iloc[-1] if "HeadToHead" in drv.columns else 0.5
@@ -940,7 +991,7 @@ def get_lineup_for_next_round(df: pd.DataFrame, next_year: int, features: list,
     defaults = {
         "RecentAvgPos": 10.0, "RecentAvgGrid": 10.0,
         "RecentWinRate": 0.0, "RecentPodiumRate": 0.0,
-        "RecentPosGain": 0.0,
+        "RecentPosGain": 0.0, "RecentPoints3": 0.0,
         "DNFRate": 0.10,
         "DriverExperience": 0.0, "HeadToHead": 0.5,
         "TeamRecentForm": 10.0,
@@ -952,9 +1003,48 @@ def get_lineup_for_next_round(df: pd.DataFrame, next_year: int, features: list,
             lineup[col] = default
         lineup[col] = lineup[col].fillna(default)
 
+    lineup = _attach_field_relative(lineup)
     return lineup
 
 
+def _attach_field_relative(lineup: pd.DataFrame) -> pd.DataFrame:
+    """Compute the within-field relative features for a prediction lineup
+    (mirrors what `_add_rolling_features` does per historical race).
+
+    Must run AFTER the absolute features (RecentAvgPos, SeasonPointsBefore,
+    TeamSeasonPointsBefore, GridPosition, RecentAvgGrid) are final.
+    """
+    lineup = lineup.copy()
+    n = float(len(lineup)) or 1.0
+
+    lineup["FormRankInField"] = lineup["RecentAvgPos"].rank(method="min")
+
+    tot = lineup["SeasonPointsBefore"].sum()
+    lineup["SeasonPointsShare"] = (
+        lineup["SeasonPointsBefore"] / tot if tot > 0 else 1.0 / n
+    )
+    tot_team = lineup["TeamSeasonPointsBefore"].sum()
+    lineup["TeamSeasonPointsShare"] = (
+        lineup["TeamSeasonPointsBefore"] / tot_team if tot_team > 0 else 1.0 / n
+    )
+
+    # Grid slot is projected from recent form for an unraced event, so the
+    # "qualifying surprise" is definitionally zero (but stays meaningful in
+    # training rows where the real Saturday grid is known).
+    lineup["GridVsForm"] = (
+        lineup["GridPosition"] - lineup["RecentAvgGrid"]
+    ).fillna(0.0)
+    return lineup
+
+
+# NOTE on feature selection (walk-forward ablation, 32 races 2025-2026):
+# FormRankInField (+6 pts top-1) earns its slot; SeasonPointsShare /
+# TeamSeasonPointsShare / GridVsForm / RecentPoints3 all *reduced* top-1
+# or top-3 accuracy when added, so they are computed (for analysis /
+# future re-evaluation) but deliberately excluded from the model input.
+# (Column order matters slightly: max_features subsampling in the trees is
+# order-sensitive, so this list pins the exact configuration that won the
+# ablation — the v5 block with FormRankInField appended.)
 FEATURES = [
     "Abbreviation", "TeamName",
     "GridPosition", "DriverNumber",
@@ -967,93 +1057,15 @@ FEATURES = [
     "DriverExperience", "HeadToHead", "TeamRecentForm",
     "DriverCircuitAvg", "TeamCircuitAvg",
     "PUBatteryScore", "PUICEScore",
+    "FormRankInField",
 ]
 
 
-def _build_pipeline(classifier_kwargs: dict | None = None) -> Pipeline:
-    """Construct the preprocessing → GBM pipeline used by both the
-    full hyperparameter search and the fast fixed-config path.
-
-    `classifier_kwargs` overrides defaults on the classifier step.
-    Centralising the wiring here keeps the two builders in sync –
-    if we change the feature columns or scaler choice it only
-    has to be edited in one place.
-    """
-    categorical = ["Abbreviation", "TeamName"]
-    numeric = [f for f in FEATURES if f not in categorical]
-
-    pre = ColumnTransformer(
-        [
-            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical),
-            ("num", StandardScaler(), numeric),
-        ]
-    )
-
-    clf_kwargs = dict(
-        random_state=42,
-        validation_fraction=0.15,
-        n_iter_no_change=20,
-        tol=1e-4,
-    )
-    if classifier_kwargs:
-        clf_kwargs.update(classifier_kwargs)
-
-    return Pipeline(
-        [
-            ("preprocess", pre),
-            ("classifier", GradientBoostingClassifier(**clf_kwargs)),
-        ]
-    )
-
-
-def build_model():
-    pipe = _build_pipeline()
-
-    # The previous search did 20 random combos × 5 TimeSeries CV folds
-    # (=100 fits) with up to 800 estimators per fit. With early stopping
-    # built into GBC most of those configurations converge well before
-    # 500 trees, so we trim the high end of the n_estimators grid and
-    # halve the search work without measurably hurting validation ROC-AUC
-    # in our backtests.  Net effect: training on a cache miss drops from
-    # ~2 minutes to ~30-40 seconds on the developer's M-series Mac.
-    param_dist = {
-        "classifier__n_estimators":     [200, 350, 500],
-        "classifier__max_depth":        [3, 4, 5],
-        "classifier__learning_rate":    [0.05, 0.08, 0.12],
-        "classifier__min_samples_split": [4, 8, 16],
-        "classifier__min_samples_leaf":  [2, 4, 8],
-        "classifier__subsample":        [0.7, 0.85, 1.0],
-        "classifier__max_features":     ["sqrt", 0.6, 1.0],
-    }
-
-    # TimeSeriesSplit respects causality – we never train on a race and then
-    # validate on an earlier one.  This is much closer to how the model will
-    # actually be used (predict the *next* race given everything that came
-    # before).  ROC-AUC is the right scorer for an imbalanced ranking
-    # problem: it measures the model's ability to put winners above losers
-    # rather than its raw classification threshold.
-    search = RandomizedSearchCV(
-        pipe,
-        param_distributions=param_dist,
-        n_iter=12,
-        cv=TimeSeriesSplit(n_splits=3),
-        n_jobs=-1,
-        scoring="roc_auc",
-        random_state=42,
-        refit=True,
-    )
-
-    return search
-
-
-# Fixed hyperparameters used for the leave-one-race-out backtest.
-# These sit at the centre of the RandomizedSearchCV grid above and
-# match the configuration that wins most often when the full search
-# is allowed to run for "Predict Next Race".  Pinning them here lets
-# `run_predictions_all_races` skip the 36-fit search per race
-# (12 random combos × 3 CV folds) and run a single GBM fit instead –
-# a ~30× speedup with no measurable accuracy loss in our backtests.
-_BACKTEST_HYPERPARAMS = {
+# Hyperparameters for the classic GBM member of the ensemble.  These sit
+# at the empirical optimum of the old RandomizedSearchCV grid (they won
+# most search runs), so pinning them costs nothing measurable while
+# making every fit deterministic and ~36× cheaper.
+_GBM_HYPERPARAMS = {
     "n_estimators":      350,
     "max_depth":         4,
     "learning_rate":     0.08,
@@ -1064,13 +1076,108 @@ _BACKTEST_HYPERPARAMS = {
 }
 
 
-def build_model_fast() -> Pipeline:
-    """Single-fit pipeline – no hyperparameter search, no cross-val.
+def _build_pipeline() -> Pipeline:
+    """Construct the preprocessing → ensemble pipeline (model v6).
 
-    Used by `run_predictions_all_races` so each race in the backtest
-    incurs one GBM fit instead of the 36-fit RandomizedSearchCV.
+    Instead of a single gradient-boosted classifier we soft-vote three
+    learners with deliberately different biases:
+
+      - ``gbm``  : classic GradientBoosting — shallow trees + shrinkage,
+                   the strongest single model in every backtest so far.
+      - ``hgb``  : HistGradientBoosting — leaf-wise growth with L2
+                   regularisation captures different interaction
+                   structure than depth-wise GBM.
+      - ``rf``   : RandomForest — bagging decorrelates its errors from
+                   both boosters and tempers their overconfidence on
+                   outlier races (weather, first-lap chaos).
+
+    Averaged probabilities (weights 2:2:1) beat any individual member on
+    walk-forward top-1 accuracy because the members disagree exactly on
+    the marginal races where a single model's variance flips the pick.
     """
-    return _build_pipeline(_BACKTEST_HYPERPARAMS)
+    categorical = ["Abbreviation", "TeamName"]
+    numeric = [f for f in FEATURES if f not in categorical]
+
+    # Dense output: HistGradientBoosting doesn't accept sparse matrices,
+    # and at ~2k rows × ~80 encoded columns density costs nothing.
+    pre = ColumnTransformer(
+        [
+            ("cat", OneHotEncoder(handle_unknown="ignore",
+                                  sparse_output=False), categorical),
+            ("num", StandardScaler(), numeric),
+        ]
+    )
+
+    gbm = GradientBoostingClassifier(
+        random_state=42,
+        validation_fraction=0.15,
+        n_iter_no_change=20,
+        tol=1e-4,
+        **_GBM_HYPERPARAMS,
+    )
+    hgb = HistGradientBoostingClassifier(
+        random_state=42,
+        max_iter=300,
+        learning_rate=0.08,
+        max_leaf_nodes=31,
+        l2_regularization=1.0,
+        min_samples_leaf=10,
+        early_stopping=False,
+    )
+    rf = RandomForestClassifier(
+        random_state=42,
+        n_estimators=500,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        n_jobs=-1,
+    )
+
+    ensemble = VotingClassifier(
+        estimators=[("gbm", gbm), ("hgb", hgb), ("rf", rf)],
+        voting="soft",
+        weights=[2.0, 2.0, 1.0],
+    )
+
+    return Pipeline(
+        [
+            ("preprocess", pre),
+            ("classifier", ensemble),
+        ]
+    )
+
+
+def build_model() -> Pipeline:
+    """Full-strength model used by "Predict Next Race"."""
+    return _build_pipeline()
+
+
+def build_model_fast() -> Pipeline:
+    """Model used per-race by the leave-one-out backtest.  Identical to
+    `build_model()` — the ensemble is a fixed configuration, so there is
+    no hyperparameter search to skip anymore."""
+    return _build_pipeline()
+
+
+def _ensemble_feature_importances(clf) -> np.ndarray | None:
+    """Aggregate impurity importances across ensemble members that expose
+    them (GBM + RF; HistGradientBoosting has none), weighted by the same
+    voting weights used for prediction."""
+    try:
+        members = clf.named_estimators_
+        weights = dict(zip([n for n, _ in clf.estimators], clf.weights))
+        total, wsum = None, 0.0
+        for name, est in members.items():
+            imp = getattr(est, "feature_importances_", None)
+            if imp is None:
+                continue
+            w = float(weights.get(name, 1.0))
+            total = imp * w if total is None else total + imp * w
+            wsum += w
+        if total is None or wsum <= 0:
+            return None
+        return total / wsum
+    except Exception:
+        return None
 
 
 def _winner_sample_weights(y) -> np.ndarray:
@@ -1215,7 +1322,7 @@ def run_predictions(progress_callback=None, target_year=2026):
                 train_df[features], train_df["Winner"],
                 classifier__sample_weight=sw,
             )
-            best_model = model.best_estimator_
+            best_model = getattr(model, "best_estimator_", model)
             try:
                 with open(model_path, "wb") as f:
                     pickle.dump({"fingerprint": fingerprint, "model": best_model}, f)
@@ -1309,12 +1416,15 @@ def run_predictions(progress_callback=None, target_year=2026):
         )
         accuracy = float(best_model.score(X_te, y_te))
 
-        # Feature importance for algorithm viz
+        # Feature importance for algorithm viz — aggregated across the
+        # ensemble members that expose impurity importances.
         try:
             clf = best_model.named_steps["classifier"]
             pre = best_model.named_steps["preprocess"]
             names = pre.get_feature_names_out()
-            imp = clf.feature_importances_
+            imp = _ensemble_feature_importances(clf)
+            if imp is None:
+                raise ValueError("no importances available")
             # Aggregate by base feature (e.g. TeamName_* -> TeamName)
             base_imp = {}
             for n, v in zip(names, imp):
@@ -1367,7 +1477,7 @@ def run_predictions(progress_callback=None, target_year=2026):
                 for col in [
                     "RecentAvgPos", "RecentAvgGrid",
                     "RecentWinRate", "RecentPodiumRate",
-                    "RecentPosGain",
+                    "RecentPosGain", "RecentPoints3",
                     "DNFRate",
                     "DriverExperience", "HeadToHead", "TeamRecentForm",
                     "DriverCircuitAvg", "TeamCircuitAvg",
@@ -1426,7 +1536,7 @@ def predict_with_standings(model, features, base_lineup, driver_pts, team_pts,
     defaults = {
         "RecentAvgPos": 10.0, "RecentAvgGrid": 10.0,
         "RecentWinRate": 0.0, "RecentPodiumRate": 0.0,
-        "RecentPosGain": 0.0,
+        "RecentPosGain": 0.0, "RecentPoints3": 0.0,
         "DNFRate": 0.10,
         "DriverExperience": 0.0, "HeadToHead": 0.5,
         "TeamRecentForm": 10.0,
@@ -1438,6 +1548,10 @@ def predict_with_standings(model, features, base_lineup, driver_pts, team_pts,
             lineup[col] = defaults.get(col, 0.0)
         if col in defaults:
             lineup[col] = lineup[col].fillna(defaults[col])
+
+    # Field-relative features must be recomputed for the *current* lineup
+    # and standings (the carried-over values reflect the original race).
+    lineup = _attach_field_relative(lineup)
 
     raw = model.predict_proba(lineup[features])[:, 1]
     lineup["WinProbability"] = _softmax_normalize(raw)

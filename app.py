@@ -1160,10 +1160,25 @@ class ApexAI:
         self._race_idx = -1
         self._season_driver_pts = {}
         self._season_team_pts = {}
+        # Telemetry font for the racing-console readouts.  Cascadia Mono
+        # ships with Windows Terminal / Win10 1903+; Consolas is on every
+        # Windows box; Courier New is the universal fallback.
+        try:
+            import tkinter.font as tkfont
+            fams = set(tkfont.families())
+        except Exception:
+            fams = set()
+        self.MONO = next(
+            (f for f in ("Cascadia Mono", "Consolas", "Menlo", "Courier New")
+             if f in fams),
+            "Courier New",
+        )
         self._build()
         # Stamp the header caption with today's date + 2026 round progress.
         # Done after _build so the caption Label exists.
         self._update_season_caption()
+        # Live console clock + blinking status LED in the header.
+        self._console_tick()
 
     # -- Header caption (date + season progress) --
     def _update_season_caption(self):
@@ -1226,8 +1241,20 @@ class ApexAI:
 
     # -- Build UI --
     def _build(self):
-        # ── Header bar (F1 logo · wordmark · model badge · accuracy chip) ──
-        hdr = tk.Frame(self.root, bg=BG, padx=36, pady=16)
+        # ── Carbon-fiber cap strip: the "top of the wheel" ──
+        if HAS_PIL:
+            cf = _make_carbon_fiber_img(2560, 10)
+            if cf is not None:
+                self._cf_strip_tk = ImageTk.PhotoImage(cf)
+                self._tk_images.append(self._cf_strip_tk)
+                cf_canvas = tk.Canvas(self.root, height=10, bg=BG,
+                                      highlightthickness=0, bd=0)
+                cf_canvas.pack(fill=tk.X)
+                cf_canvas.create_image(0, 0, image=self._cf_strip_tk,
+                                       anchor="nw")
+
+        # ── Header bar (F1 logo · wordmark · telemetry cluster) ──
+        hdr = tk.Frame(self.root, bg=BG, padx=36, pady=14)
         hdr.pack(fill=tk.X)
 
         # Left: official F1-style logo + bold ApexAI wordmark + caption.
@@ -1288,11 +1315,13 @@ class ApexAI:
         # the layout doesn't shift.
         self._caption_lbl = tk.Label(
             title_box, text="F1 RACE PREDICTOR  ·  2026 SEASON",
-            font=("Helvetica Neue", 9), fg=MUTED, bg=BG,
+            font=(self.MONO, 8), fg=MUTED, bg=BG,
         )
         self._caption_lbl.pack(anchor="w", pady=(1, 0))
 
-        # Right: model + accuracy chips, populated after a load.
+        # Right: telemetry cluster — SYS heartbeat LED, session clock,
+        # model + accuracy modules.  Reads like the top strip of a pit-wall
+        # timing console.
         chips = tk.Frame(hdr, bg=BG)
         chips.pack(side=tk.RIGHT)
         self.acc_chip = self._make_chip(
@@ -1300,39 +1329,48 @@ class ApexAI:
         )
         self.acc_chip.pack(side=tk.RIGHT, padx=(8, 0))
         self.model_chip = self._make_chip(
-            chips, "MODEL", "GBM v4", muted=True,
+            chips, "MODEL", "ENS v6", muted=True,
         )
-        self.model_chip.pack(side=tk.RIGHT, padx=(0, 8))
+        self.model_chip.pack(side=tk.RIGHT, padx=(8, 0))
+        self.clock_chip = self._make_chip(
+            chips, "LOCAL", "--:--:--", muted=False,
+        )
+        self.clock_chip.pack(side=tk.RIGHT, padx=(8, 0))
+        self.sys_chip = self._make_chip(
+            chips, "SYS", "● ONLINE", muted=False,
+        )
+        self.sys_chip._value.configure(fg=GREEN)
+        self.sys_chip.pack(side=tk.RIGHT, padx=(0, 0))
 
         # Thin red rule under the header for that broadcast-graphic feel.
         tk.Frame(self.root, bg=F1_RED, height=2).pack(fill=tk.X, padx=36)
 
-        # ── Tab bar (underline-accent navigation) ──
+        # ── Console switch panel (steering-wheel style numbered buttons) ──
         ctrl = tk.Frame(self.root, bg=BG, padx=36, pady=10)
         ctrl.pack(fill=tk.X)
 
-        self.btn_predict = self._make_tab(ctrl, "Predict Next Race",
-                                           self._on_predict)
+        self.btn_predict = self._make_tab(ctrl, "PREDICT",
+                                           self._on_predict, num="01")
         self.btn_predict.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.btn_all = self._make_tab(ctrl, "Backtest All Races",
-                                       self._on_all_races)
+        self.btn_all = self._make_tab(ctrl, "BACKTEST",
+                                       self._on_all_races, num="02")
         self.btn_all.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.btn_viz = self._make_tab(ctrl, "Race Visualization",
-                                       self._on_show_viz)
+        self.btn_viz = self._make_tab(ctrl, "VISUALIZATION",
+                                       self._on_show_viz, num="03")
         self.btn_viz.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.btn_radio = self._make_tab(ctrl, "Team Radio",
-                                         self._on_show_radio)
+        self.btn_radio = self._make_tab(ctrl, "TEAM RADIO",
+                                         self._on_show_radio, num="04")
         self.btn_radio.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.btn_replays = self._make_tab(ctrl, "Race Replays",
-                                           self._on_show_replays)
+        self.btn_replays = self._make_tab(ctrl, "REPLAYS",
+                                           self._on_show_replays, num="05")
         self.btn_replays.pack(side=tk.LEFT, padx=(0, 6))
 
         # Trailing refresh button is visually quieter (icon-style ↻).
-        self.btn_refresh = self._make_tab(ctrl, "↻  Refresh",
+        self.btn_refresh = self._make_tab(ctrl, "↻ REFRESH",
                                            self._on_refresh, secondary=True)
         self.btn_refresh.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1343,22 +1381,27 @@ class ApexAI:
         # Packed at the BOTTOM of the window first so the body fills the
         # remaining space.  Holds the activity message on the left and a
         # tiny version label on the right.
-        footer = tk.Frame(self.root, bg=BG_SURFACE, height=28)
+        footer = tk.Frame(self.root, bg="#101016", height=28)
         footer.pack(side=tk.BOTTOM, fill=tk.X)
         footer.pack_propagate(False)
         # Hairline rule above the footer for a "broadcast lower-third" look.
         tk.Frame(self.root, bg=BORDER, height=1).pack(
             side=tk.BOTTOM, fill=tk.X,
         )
+        # Left: red telemetry tick + live status readout in mono.
+        status_box = tk.Frame(footer, bg="#101016")
+        status_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(status_box, text="▍", font=(self.MONO, 10, "bold"),
+                 fg=F1_RED, bg="#101016").pack(side=tk.LEFT, padx=(36, 4))
         self.status_lbl = tk.Label(
-            footer, text="Ready.", font=("Helvetica Neue", 10),
-            fg=GRAY, bg=BG_SURFACE, anchor="w", padx=36,
+            status_box, text="READY", font=(self.MONO, 9),
+            fg=GRAY, bg="#101016", anchor="w",
         )
         self.status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(
             footer,
-            text="ApexAI · powered by FastF1 + OpenF1 · 2026 mid-season build",
-            font=("Helvetica Neue", 9), fg=MUTED, bg=BG_SURFACE,
+            text="APEX OS · ENS v6 · FASTF1 + OPENF1 · 2026",
+            font=(self.MONO, 8), fg=MUTED, bg="#101016",
             padx=36,
         ).pack(side=tk.RIGHT)
 
@@ -1421,30 +1464,34 @@ class ApexAI:
         right.pack(side=tk.RIGHT, fill=tk.Y)
         right.pack_propagate(False)
 
-        # Card 1 — model stats (compact 4-row table)
+        # Card 1 — model telemetry (compact 4-row readout)
         stats = tk.Frame(right, bg=BG_CARD, padx=14, pady=10)
         stats.pack(fill=tk.X, pady=(0, 10))
         stats.configure(highlightbackground=BORDER, highlightthickness=1)
         tk.Frame(stats, bg=F1_RED, height=2).pack(fill=tk.X, pady=(0, 8))
-        tk.Label(stats, text="MODEL", font=("Helvetica Neue", 9, "bold"),
-                 fg=F1_RED, bg=BG_CARD).pack(anchor="w")
+        stats_hd = tk.Frame(stats, bg=BG_CARD)
+        stats_hd.pack(fill=tk.X)
+        tk.Label(stats_hd, text="■", font=(self.MONO, 7),
+                 fg=F1_RED, bg=BG_CARD).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(stats_hd, text="MODEL TELEMETRY", font=(self.MONO, 9, "bold"),
+                 fg=WHITE, bg=BG_CARD).pack(side=tk.LEFT)
         tk.Frame(stats, bg=BORDER, height=1).pack(fill=tk.X, pady=(5, 6))
 
         def _stat_row(label, value_tk_attr):
             row = tk.Frame(stats, bg=BG_CARD)
             row.pack(fill=tk.X, pady=1)
-            tk.Label(row, text=label, font=("Helvetica Neue", 9),
+            tk.Label(row, text=label, font=(self.MONO, 8),
                      fg=MUTED, bg=BG_CARD).pack(side=tk.LEFT)
-            v = tk.Label(row, text="—", font=("Helvetica Neue", 10, "bold"),
+            v = tk.Label(row, text="—", font=(self.MONO, 10, "bold"),
                          fg=WHITE, bg=BG_CARD)
             v.pack(side=tk.RIGHT)
             setattr(self, value_tk_attr, v)
 
-        _stat_row("Accuracy",            "_stat_accuracy")
-        _stat_row("Algorithm",           "_stat_algo")
-        _stat_row("Training races",      "_stat_train")
-        _stat_row("Features",            "_stat_features")
-        self._stat_algo.configure(text="GBM v4", fg=F1_RED)
+        _stat_row("ACCURACY",       "_stat_accuracy")
+        _stat_row("ALGORITHM",      "_stat_algo")
+        _stat_row("TRAINING RACES", "_stat_train")
+        _stat_row("FEATURES",       "_stat_features")
+        self._stat_algo.configure(text="ENS v6", fg=F1_RED)
 
         # Card 2 — feature importance chart
         chart_card = tk.Frame(right, bg=BG_CARD, padx=12, pady=10)
@@ -1453,9 +1500,11 @@ class ApexAI:
         tk.Frame(chart_card, bg=F1_RED, height=2).pack(fill=tk.X, pady=(0, 6))
         head_row = tk.Frame(chart_card, bg=BG_CARD)
         head_row.pack(fill=tk.X)
+        tk.Label(head_row, text="■", font=(self.MONO, 7),
+                 fg=F1_RED, bg=BG_CARD).pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(head_row, text="FEATURE IMPORTANCE",
-                 font=("Helvetica Neue", 9, "bold"),
-                 fg=F1_RED, bg=BG_CARD).pack(side=tk.LEFT)
+                 font=(self.MONO, 9, "bold"),
+                 fg=WHITE, bg=BG_CARD).pack(side=tk.LEFT)
         tk.Label(head_row, text="what drives the prediction",
                  font=("Helvetica Neue", 8, "italic"),
                  fg=MUTED, bg=BG_CARD).pack(side=tk.LEFT, padx=(8, 0))
@@ -1468,12 +1517,17 @@ class ApexAI:
         how_card.pack(fill=tk.X)
         how_card.configure(highlightbackground=BORDER, highlightthickness=1)
         tk.Frame(how_card, bg=F1_RED, height=2).pack(fill=tk.X, pady=(0, 6))
-        tk.Label(how_card, text="HOW IT WORKS",
-                 font=("Helvetica Neue", 9, "bold"),
-                 fg=F1_RED, bg=BG_CARD).pack(anchor="w")
+        how_hd = tk.Frame(how_card, bg=BG_CARD)
+        how_hd.pack(fill=tk.X)
+        tk.Label(how_hd, text="■", font=(self.MONO, 7),
+                 fg=F1_RED, bg=BG_CARD).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(how_hd, text="HOW IT WORKS",
+                 font=(self.MONO, 9, "bold"),
+                 fg=WHITE, bg=BG_CARD).pack(side=tk.LEFT)
         tk.Frame(how_card, bg=BORDER, height=1).pack(fill=tk.X, pady=(5, 6))
         for bullet in (
-            "Gradient-boosted model trained on every F1 race since 2018.",
+            "Three-model ensemble (2\u00d7 gradient boosting + random forest) "
+            "soft-votes every driver's win score.",
             "Softmax over per-driver scores so probabilities sum to 100% "
             "and stay calibrated each race.",
         ):
@@ -1546,27 +1600,39 @@ class ApexAI:
         label.bind("<Leave>", lambda e, f=frame: self._btn_hover(f, False))
         return frame
 
-    def _make_tab(self, parent, text, cmd, secondary=False):
-        """Tab-style nav control: flat label on top of a thin underline that
-        switches to F1 red when active.  Far less visually heavy than the old
-        pill buttons, and the active state is unambiguous."""
-        fg_default = GRAY if secondary else WHITE
-        wrap = tk.Frame(parent, bg=BG, cursor="hand2")
-        body = tk.Frame(wrap, bg=BG, cursor="hand2")
+    def _make_tab(self, parent, text, cmd, secondary=False, num=None):
+        """Console-switch nav control, styled like a steering-wheel button:
+        a bordered dark module with a mono numbered key ("01") beside an
+        uppercase label, and a bottom light-bar that glows F1 red when the
+        mode is engaged."""
+        fg_default = MUTED if secondary else GRAY
+        wrap = tk.Frame(parent, bg=BG_SURFACE, cursor="hand2",
+                        highlightbackground=BORDER, highlightthickness=1)
+        body = tk.Frame(wrap, bg=BG_SURFACE, cursor="hand2")
         body.pack(fill=tk.X)
+        num_lbl = None
+        if num:
+            num_lbl = tk.Label(body, text=num,
+                               font=(self.MONO, 8),
+                               fg=MUTED, bg=BG_SURFACE,
+                               padx=0, pady=7, cursor="hand2")
+            num_lbl.pack(side=tk.LEFT, padx=(10, 0))
         lbl = tk.Label(body, text=text,
-                        font=("Helvetica Neue", 11, "bold"),
-                        fg=fg_default, bg=BG,
-                        padx=14, pady=8, cursor="hand2")
-        lbl.pack()
-        # 2-pixel underline that becomes red when active, dark otherwise.
-        underline = tk.Frame(wrap, bg=BG, height=2)
+                        font=(self.MONO, 10, "bold"),
+                        fg=fg_default, bg=BG_SURFACE,
+                        padx=10, pady=7, cursor="hand2")
+        lbl.pack(side=tk.LEFT, padx=(0, 4 if num else 0))
+        # Bottom light-bar: glows red when the mode is engaged.
+        underline = tk.Frame(wrap, bg="#101016", height=3)
         underline.pack(fill=tk.X)
-        for w in (wrap, body, lbl):
+        widgets = [wrap, body, lbl] + ([num_lbl] if num_lbl else [])
+        for w in widgets:
             w.bind("<Button-1>", lambda e: cmd())
             w.bind("<Enter>", lambda e, t=wrap: self._tab_hover(t, True))
             w.bind("<Leave>", lambda e, t=wrap: self._tab_hover(t, False))
         wrap._label = lbl
+        wrap._num = num_lbl
+        wrap._body = body
         wrap._underline = underline
         wrap._default_fg = fg_default
         wrap._active = False
@@ -1574,15 +1640,24 @@ class ApexAI:
         wrap._secondary = secondary
         return wrap
 
+    def _set_tab_bg(self, tab, bg):
+        tab.configure(bg=bg)
+        tab._body.configure(bg=bg)
+        tab._label.configure(bg=bg)
+        if tab._num is not None:
+            tab._num.configure(bg=bg)
+
     def _tab_hover(self, tab, entering):
         if tab._active:
             return
         if entering:
+            self._set_tab_bg(tab, BG_HOVER)
             tab._label.configure(fg=WHITE)
             tab._underline.configure(bg=BORDER)
         else:
+            self._set_tab_bg(tab, BG_SURFACE)
             tab._label.configure(fg=tab._default_fg)
-            tab._underline.configure(bg=BG)
+            tab._underline.configure(bg="#101016")
 
     def _btn_hover(self, btn, entering):
         if getattr(btn, "_is_tab", False):
@@ -1600,8 +1675,12 @@ class ApexAI:
         for btn in self._all_btns:
             if getattr(btn, "_is_tab", False):
                 btn._active = False
+                self._set_tab_bg(btn, BG_SURFACE)
                 btn._label.configure(fg=btn._default_fg)
-                btn._underline.configure(bg=BG)
+                if btn._num is not None:
+                    btn._num.configure(fg=MUTED)
+                btn._underline.configure(bg="#101016")
+                btn.configure(highlightbackground=BORDER)
             else:
                 btn._current_bg = btn._default_bg
                 btn.configure(bg=btn._default_bg,
@@ -1610,26 +1689,38 @@ class ApexAI:
         if active_btn:
             if getattr(active_btn, "_is_tab", False):
                 active_btn._active = True
+                self._set_tab_bg(active_btn, BG_HOVER)
                 active_btn._label.configure(fg=WHITE)
+                if active_btn._num is not None:
+                    active_btn._num.configure(fg=GOLD_GLOW)
                 active_btn._underline.configure(bg=F1_RED)
+                active_btn.configure(highlightbackground=F1_RED)
             else:
                 active_btn._current_bg = GOLD_DIM
                 active_btn.configure(bg=GOLD_DIM, highlightbackground=GOLD_DIM)
                 active_btn._label.configure(fg=GOLD, bg=GOLD_DIM)
 
     def _make_chip(self, parent, label, value, muted=False, accent=False):
-        """Compact label/value chip for the header (e.g. "ACCURACY  82%").
-        Returns the outer Frame; the value label is exposed as ``chip._value``
-        so the caller can update it later."""
-        outer = tk.Frame(parent, bg=BG_SURFACE, padx=10, pady=4)
+        """Telemetry module for the header cluster: a bordered dark panel
+        with a red index bar on the left, a tiny mono caption stacked above
+        a bold mono value — reads like one cell of a pit-wall timing screen.
+        Returns the outer Frame; the value label is exposed as
+        ``chip._value`` so the caller can update it later."""
+        outer = tk.Frame(parent, bg=BG_SURFACE)
         outer.configure(highlightbackground=BORDER, highlightthickness=1)
-        tk.Label(outer, text=label, font=("Helvetica Neue", 8, "bold"),
-                 fg=MUTED, bg=BG_SURFACE).pack(side=tk.LEFT)
-        val_color = F1_RED if accent else (MUTED if muted else WHITE)
-        val_lbl = tk.Label(outer, text=value,
-                           font=("Helvetica Neue", 10, "bold"),
+        # Left index bar (the "LED" edge of the module).
+        tk.Frame(outer, bg=F1_RED, width=3).pack(
+            side=tk.LEFT, fill=tk.Y,
+        )
+        inner = tk.Frame(outer, bg=BG_SURFACE, padx=9, pady=3)
+        inner.pack(side=tk.LEFT)
+        tk.Label(inner, text=label, font=(self.MONO, 7),
+                 fg=MUTED, bg=BG_SURFACE).pack(anchor="w")
+        val_color = F1_RED if accent else (GRAY if muted else WHITE)
+        val_lbl = tk.Label(inner, text=value,
+                           font=(self.MONO, 10, "bold"),
                            fg=val_color, bg=BG_SURFACE)
-        val_lbl.pack(side=tk.LEFT, padx=(8, 0))
+        val_lbl.pack(anchor="w")
         outer._value = val_lbl
         return outer
 
@@ -1637,6 +1728,20 @@ class ApexAI:
         chip._value.configure(
             text=value, fg=F1_RED if accent else WHITE,
         )
+
+    def _console_tick(self):
+        """1 Hz heartbeat for the header cluster: refresh the LOCAL clock
+        and pulse the SYS LED so the console reads as live."""
+        try:
+            now = datetime.now()
+            self.clock_chip._value.configure(text=now.strftime("%H:%M:%S"))
+            on = now.second % 2 == 0
+            self.sys_chip._value.configure(
+                fg=GREEN if on else "#1B7A4A",
+            )
+            self.root.after(1000, self._console_tick)
+        except Exception:
+            pass  # window is being torn down
 
     @staticmethod
     def _lighten(hex_c, amt=20):
