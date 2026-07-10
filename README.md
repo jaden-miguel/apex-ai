@@ -9,7 +9,7 @@ pit-wall racing console — complete with a broadcast-style podium,
 per-circuit ambient theming, live FIA team-radio playback, and
 one-click race replays for every session of every round.
 
-![ApexAI GUI](screenshot.png)
+![ApexAI racing-console GUI — v6 ensemble predictions](screenshot.png)
 
 > Looking for the full product spec? See [`docs/PRD.md`](docs/PRD.md).
 
