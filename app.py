@@ -1222,16 +1222,14 @@ class ApexAI:
 
     # -- Logo cache --
     def _logo(self, team: str, sz: int = 24):
+        # NOTE: logos are kept fully transparent (RGBA) — flattening them
+        # onto a solid square made every logo show up as a visible box on
+        # any container whose colour differs (e.g. the maroon hero card).
         k = f"{team}_{sz}"
         if k not in self._logos:
             if HAS_PIL:
                 img = load_logo(team, sz)
                 if img:
-                    if img.mode == "RGBA":
-                        bg_rgb = tuple(int(BG_CARD.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
-                        solid = Image.new("RGBA", img.size, (*bg_rgb, 255))
-                        solid.paste(img, (0, 0), img)
-                        img = solid
                     self._logos[k] = ImageTk.PhotoImage(img)
                 else:
                     self._logos[k] = None

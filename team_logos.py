@@ -134,6 +134,60 @@ def create_badge(team_name: str, size: int = 28) -> "Image.Image":
     return img
 
 
+def _remove_baked_background(img: "Image.Image") -> "Image.Image":
+    """Chroma-key away a solid background that is baked into the file.
+
+    Most of our logo PNGs have a proper alpha channel, but some sources
+    ship the artwork on a filled rectangle (e.g. Red Bull's navy
+    lockup), which then renders as an ugly coloured box on any surface
+    that isn't that exact colour.
+
+    Detection: the image is essentially fully opaque AND its border is
+    dominated by a single colour.  Removal: per-pixel distance from that
+    border colour is mapped to alpha with a soft ramp, so anti-aliased
+    edge pixels fade out cleanly instead of leaving a hard fringe.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return img
+
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    arr = np.asarray(img).astype(np.int16)
+    h, w = arr.shape[:2]
+    if h < 8 or w < 8:
+        return img
+
+    # Opaque fraction — logos with real transparency are left untouched.
+    alpha = arr[..., 3]
+    if (alpha > 200).mean() < 0.90:
+        return img
+
+    # Border colour: median RGB of the 2-pixel frame around the image.
+    border = np.concatenate([
+        arr[:2, :, :3].reshape(-1, 3),
+        arr[-2:, :, :3].reshape(-1, 3),
+        arr[:, :2, :3].reshape(-1, 3),
+        arr[:, -2:, :3].reshape(-1, 3),
+    ])
+    bg = np.median(border, axis=0)
+
+    # Bail if the border isn't actually a uniform fill (mixed artwork
+    # reaching the edges means there is no single background to key out).
+    if np.abs(border - bg).max(axis=1).mean() > 40:
+        return img
+
+    # Soft key: fully transparent within `lo` of the background colour,
+    # fully opaque beyond `hi`, linear ramp in between.
+    dist = np.abs(arr[..., :3] - bg).max(axis=2).astype(np.float32)
+    lo, hi = 25.0, 80.0
+    keep = np.clip((dist - lo) / (hi - lo), 0.0, 1.0)
+    out = arr.astype(np.float32)
+    out[..., 3] = out[..., 3] * keep
+    return Image.fromarray(out.clip(0, 255).astype(np.uint8), "RGBA")
+
+
 def _trim_transparent(img: "Image.Image") -> "Image.Image":
     """Strip fully-transparent borders so the actual artwork fills the
     target box.  Returns the original image if there's nothing to trim
@@ -180,6 +234,11 @@ def load_logo(team_name: str, size: int = 28) -> "Image.Image":
             sw, sh = src.size
             if sw <= 0 or sh <= 0:
                 continue
+
+            # Step 1b – key out any solid background baked into the file
+            # (e.g. Red Bull's navy rectangle) so no logo ever renders
+            # as a coloured box.
+            src = _remove_baked_background(src)
 
             # Step 2 – icon crop for small renders
             if size <= LOGO_ICON_CROP_MAX_SIZE and team_name in LOGO_ICON_CROP:
