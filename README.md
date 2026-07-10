@@ -15,15 +15,24 @@ playback, and one-click race replays for every session of every round.
 ## Highlights
 
 - **Calibrated win probabilities** — Gradient Boosting Classifier
-  (`prediction.py`) tuned with `RandomizedSearchCV` over a
-  `TimeSeriesSplit` (ROC-AUC scoring) so the model never trains on
+  (`prediction.py`, model v5) tuned with `RandomizedSearchCV` over a
+  `TimeSeriesSplit` (5-fold, ROC-AUC scoring) so the model never trains on
   races run after the validation set. Raw logits are softmax-calibrated
   with a temperature term so the grid sums to 100 % and no driver
   collapses to a 0 % outlier.
-- **Rich feature engineering** — cumulative championship points,
-  rolling win/podium rates, average finish, head-to-head vs teammate,
-  DNF rate, driver experience, team / power-unit form, all derived on
-  the fly from FastF1 results.
+- **Validated on the 2026 season** — in a walk-forward backtest (train on
+  every race before each round, predict that round) the model picks the
+  actual winner in 6 of the 8 completed 2026 rounds (75 % top-1) and has
+  the winner inside its top 3 for all 8 (100 % top-3).
+- **Rich feature engineering** — season-to-date championship standings
+  (driver + team, leak-free), career points, rolling win/podium rates,
+  average finish, grid→finish racecraft delta, head-to-head vs teammate,
+  DNF rate, driver experience, circuit affinity, and team / power-unit
+  form, all derived on the fly from FastF1 results.
+- **Recency-weighted training** — training rows decay at `0.85^age` per
+  season, so races run under the 2026 regulations (50/50 hybrid power
+  split, new aero, Cadillac + Audi) dominate the fit while older
+  ground-effect seasons still contribute signal.
 - **Fast leave-one-race-out backtest** — the full 2022 → 2026 backtest
   (96 races) finishes in ~28 seconds on a multi-core Mac (down from
   ~50 minutes) by skipping the per-race hyperparameter search and

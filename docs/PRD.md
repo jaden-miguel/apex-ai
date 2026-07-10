@@ -1,6 +1,6 @@
 # ApexAI — Product Requirements Document
 
-> Last updated: May 24, 2026 (mid-season build)
+> Last updated: July 9, 2026 (mid-season build, model v5)
 
 ## 1. Overview
 
@@ -110,6 +110,15 @@ need to follow the race.
   on the active grid.
 - **F1.2.** Probabilities sum to 100 % across the grid (softmax-calibrated
   with a temperature term so no driver collapses to 0 %).
+- **F1.2a.** (v5) Features must include leak-free *season-to-date*
+  championship standings for driver and team (the team variant built
+  from per-round totals so a row never sees its teammate's points from
+  the same race) and a grid→finish racecraft delta, alongside the
+  career-points, rolling-form, circuit-affinity, and power-unit
+  features.
+- **F1.2b.** (v5) Training rows are weighted by winner-class balancing
+  × a per-season recency decay (`0.85^age`) so races run under the
+  current regulations dominate the fit.
 - **F1.3.** UI displays a podium card (P1/P2/P3) with procedural gold,
   silver, and bronze trophies, plus the full grid sorted by probability.
 - **F1.4.** Cached predictions hydrate instantly on relaunch
@@ -230,6 +239,11 @@ need to follow the race.
 
 - **Accuracy on backtest:** ≥ 60 % winner-pick rate across the
   2022 – present span (currently 61.5 %).
+- **Walk-forward accuracy on the current season** (train on every race
+  before round N, predict round N — mirrors production use): ≥ 60 %
+  top-1 and ≥ 90 % top-3. Model v5 currently hits 6/8 (75 %) top-1 and
+  8/8 (100 %) top-3 through 2026 round 9. Regressions against this
+  benchmark block model changes.
 - **Cold-to-podium time:** ≤ 3 min on a fresh install.
 - **Warm-to-podium time:** ≤ 5 s.
 - **Backtest run time:** ≤ 60 s.
@@ -263,6 +277,9 @@ need to follow the race.
 
 - **Live qualifying integration** — show grid-position adjusted
   predictions as quali results come in.
+- **Weather features** — both 2026 walk-forward misses (Hamilton R7,
+  Leclerc R9) were upset wins the model ranked 2nd–3rd; wet-race
+  signals are the most promising lever for catching them.
 - **Lap-time forecasts** — extend the model from "who wins" to
   "what's the expected race time".
 - **Driver-vs-driver head-to-head card** — pick any two drivers and
