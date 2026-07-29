@@ -10,6 +10,7 @@ model_cache.pkl
 last_predictions.pkl
 .apex_ai.lock
 radio_cache/
+replay_cache/
 schedule_cache.json
 *.pyc
 
