@@ -43,9 +43,23 @@ try:
 except ImportError:
     HAS_PIL = False
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+# Matplotlib is only needed once a chart is actually drawn — the feature
+# importance bars and the telemetry traces.  Importing pyplot costs ~1.5 s,
+# so it is loaded on first use instead of at launch.  `Agg` is selected
+# before pyplot is imported, exactly as it was at module scope.
+_PLT = None
+
+
+def plt():
+    """Lazy `matplotlib.pyplot` handle.  Call it, then use the result:
+    ``plt().subplots(...)``."""
+    global _PLT
+    if _PLT is None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _pyplot
+        _PLT = _pyplot
+    return _PLT
 
 from prediction import (
     run_predictions,
@@ -53,6 +67,7 @@ from prediction import (
     predict_with_standings,
     F1_POINTS,
     load_last_result,
+    load_cached_model,
     acquire_singleton,
     get_event_schedule_cached,
 )
@@ -1175,6 +1190,10 @@ class ApexAI:
         self._pickers = {}
         self._telemetry_built = False
         self._replay_built = False
+        # Which half of the Replays tab is showing: "replay" (data-driven
+        # session replay) or "replays" (FullRaces broadcast archive).
+        # Remembered across visits so the tab reopens where you left it.
+        self._replay_mode = "replay"
         self._replay = None          # loaded telemetry.Replay
         self._replay_playing = False
         self._replay_frame = 0.0
@@ -1395,10 +1414,6 @@ class ApexAI:
                                              self._on_show_telemetry, num="06")
         self.btn_telemetry.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.btn_replay = self._make_tab(ctrl, "SESSION REPLAY",
-                                          self._on_show_replay, num="07")
-        self.btn_replay.pack(side=tk.LEFT, padx=(0, 6))
-
         # Trailing refresh button is visually quieter (icon-style ↻).
         self.btn_refresh = self._make_tab(ctrl, "↻ REFRESH",
                                            self._on_refresh, secondary=True)
@@ -1406,8 +1421,7 @@ class ApexAI:
 
         self._all_btns = [self.btn_predict, self.btn_all, self.btn_viz,
                           self.btn_radio, self.btn_replays,
-                          self.btn_telemetry, self.btn_replay,
-                          self.btn_refresh]
+                          self.btn_telemetry, self.btn_refresh]
 
         # ── Footer status bar (always visible, never truncated) ──
         # Packed at the BOTTOM of the window first so the body fills the
@@ -1448,8 +1462,34 @@ class ApexAI:
         # Team radio view (hidden initially)
         self.radio_frame = tk.Frame(self.root, bg=BG, padx=36, pady=8)
 
-        # Race replays view (hidden initially) – links to FullRaces.com
-        self.replays_frame = tk.Frame(self.root, bg=BG, padx=36, pady=8)
+        # Replays hub (hidden initially) – one tab holding both ways to
+        # watch a session back: the data-driven live replay rebuilt from
+        # FastF1 streams, and the FullRaces.com broadcast archive.  A
+        # segmented switch under the title picks between them; each half
+        # is still lazily built the first time it is actually shown.
+        self.replayhub_frame = tk.Frame(self.root, bg=BG)
+
+        hub_head = tk.Frame(self.replayhub_frame, bg=BG, padx=36)
+        hub_head.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(hub_head, text="REPLAYS",
+                 font=("Helvetica Neue", 16, "bold"),
+                 fg=GOLD, bg=BG).pack(side=tk.LEFT, padx=(0, 18))
+        self._replay_subtabs = {
+            "replay": self._make_subtab(
+                hub_head, "LIVE SESSION",
+                lambda: self._show_replay_mode("replay")),
+            "replays": self._make_subtab(
+                hub_head, "BROADCAST ARCHIVE",
+                lambda: self._show_replay_mode("replays")),
+        }
+        self._replay_subtabs["replay"].pack(side=tk.LEFT, padx=(0, 6))
+        self._replay_subtabs["replays"].pack(side=tk.LEFT, padx=(0, 6))
+
+        hub_body = tk.Frame(self.replayhub_frame, bg=BG)
+        hub_body.pack(fill=tk.BOTH, expand=True)
+
+        # Race replays view – links to FullRaces.com
+        self.replays_frame = tk.Frame(hub_body, bg=BG, padx=36, pady=8)
         self._replays_built = False
         self._replays_year = None
 
@@ -1457,7 +1497,7 @@ class ApexAI:
         # initially).  Both are lazily built on first open like the tabs
         # above, so launch time is unaffected.
         self.telemetry_frame = tk.Frame(self.root, bg=BG, padx=28, pady=8)
-        self.replay_frame = tk.Frame(self.root, bg=BG, padx=20, pady=6)
+        self.replay_frame = tk.Frame(hub_body, bg=BG, padx=20, pady=6)
         self._radio_clips = []
         self._radio_clip_meta = []        # parallel: per-clip {lap, event, dt}
         self._radio_event_log = []        # raw f1radio event_log for the race
@@ -1594,9 +1634,17 @@ class ApexAI:
                 f"Showing cached predictions  ·  click ↻ Refresh to retrain on latest data"
             )
             self._update_model_stats(cached)
-            self._render_chart(cached.get("feature_importance", {}))
             self._clear()
             self._display_prediction_ui(cached)
+            # The feature-importance bars are the only thing on this
+            # screen that needs matplotlib (~1.5 s to import).  Draw them
+            # on a short timer rather than `after_idle`: idle callbacks
+            # run in the same cycle that first maps the window, so the
+            # window would still wait on pyplot.  A timer lets the console
+            # paint, then the chart fills in.
+            self.root.after(
+                60, lambda: self._render_chart(
+                    cached.get("feature_importance", {})))
         else:
             self._show_empty(
                 "Ready to predict.\n\nClick "
@@ -1677,6 +1725,41 @@ class ApexAI:
         wrap._is_tab = True
         wrap._secondary = secondary
         return wrap
+
+    def _make_subtab(self, parent, text, cmd):
+        """Segment of an in-tab mode switch (used by the Replays hub).
+        Deliberately quieter than a console tab — no number key, no
+        light-bar — so it reads as a choice *within* the engaged mode
+        rather than as another top-level mode."""
+        wrap = tk.Frame(parent, bg=BG_SURFACE, cursor="hand2",
+                        highlightbackground=BORDER, highlightthickness=1)
+        lbl = tk.Label(wrap, text=text, font=(self.MONO, 9, "bold"),
+                       fg=GRAY, bg=BG_SURFACE, padx=14, pady=5,
+                       cursor="hand2")
+        lbl.pack()
+        for w in (wrap, lbl):
+            w.bind("<Button-1>", lambda e: cmd())
+            w.bind("<Enter>", lambda e, t=wrap: self._subtab_hover(t, True))
+            w.bind("<Leave>", lambda e, t=wrap: self._subtab_hover(t, False))
+        wrap._label = lbl
+        wrap._active = False
+        return wrap
+
+    def _subtab_hover(self, tab, entering):
+        if tab._active:
+            return
+        bg = BG_HOVER if entering else BG_SURFACE
+        tab.configure(bg=bg)
+        tab._label.configure(bg=bg, fg=WHITE if entering else GRAY)
+
+    def _set_active_subtab(self, view):
+        """Light up the segment matching `view` ("replay" / "replays")."""
+        for key, tab in self._replay_subtabs.items():
+            on = (key == view)
+            bg = F1_RED if on else BG_SURFACE
+            tab._active = on
+            tab.configure(bg=bg, highlightbackground=F1_RED if on else BORDER)
+            tab._label.configure(bg=bg, fg=WHITE if on else GRAY)
 
     def _set_tab_bg(self, tab, bg):
         tab.configure(bg=bg)
@@ -1857,9 +1940,34 @@ class ApexAI:
     def _on_predict(self):
         self._set_active_btn(self.btn_predict)
 
-        if self.result and self._schedule and "_model" in self.result:
-            self._advance_and_predict()
-            return
+        if self.result and self._schedule:
+            if self.result.get("_model") is not None:
+                self._advance_and_predict()
+                return
+            if self.result.get("_has_model"):
+                # A fitted ensemble is on disk but not in memory yet.
+                # Unpickling it pulls in all of sklearn (~3.5 s), so do it
+                # on a worker thread rather than freezing the console —
+                # then pick up where we left off.
+                self._set_status("Warming up the cached model…")
+
+                def load():
+                    model = load_cached_model()
+
+                    def done():
+                        if model is None:
+                            # Cache turned out to be unusable — fall
+                            # through to a full prediction run.
+                            self.result.pop("_has_model", None)
+                            self._on_predict()
+                            return
+                        self.result["_model"] = model
+                        self._advance_and_predict()
+
+                    self.root.after(0, done)
+
+                threading.Thread(target=load, daemon=True).start()
+                return
 
         self._set_status("Loading data...")
         self._clear()
@@ -2078,7 +2186,8 @@ class ApexAI:
         self._clear()
         self._show_empty(
             "Running backtest on every race…\n"
-            "Takes about 30 seconds on a multi-core Mac."
+            "About 30 seconds on a multi-core Mac; considerably longer "
+            "on Windows.\nProgress is reported in the status bar below."
         )
 
         def work():
@@ -2304,7 +2413,7 @@ class ApexAI:
         # are a bit larger than matplotlib's default, so this matches reality.
         # Keep the chart short (2.4 in) so the HOW IT WORKS card below sits
         # above the fold on a 920-px window.
-        fig, ax = plt.subplots(figsize=(4.0, 2.4), facecolor=BG_CARD, dpi=110)
+        fig, ax = plt().subplots(figsize=(4.0, 2.4), facecolor=BG_CARD, dpi=110)
         fig.subplots_adjust(left=0.50, right=0.97, top=0.97, bottom=0.04)
         ax.set_facecolor(BG_CARD)
         # Saturate from F1 red on the leader down to a soft maroon.
@@ -2338,9 +2447,9 @@ class ApexAI:
         # NB: don't use tight_layout here – it overrides subplots_adjust and
         # re-introduces the label clipping we just fixed.
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=110, bbox_inches=None,
+        plt().savefig(buf, format="png", dpi=110, bbox_inches=None,
                     facecolor=BG_CARD)
-        plt.close()
+        plt().close()
         buf.seek(0)
         if HAS_PIL:
             img = Image.open(buf).convert("RGB")
@@ -2416,6 +2525,7 @@ class ApexAI:
         self.body.pack_forget()
         self.viz_frame.pack_forget()
         self.radio_frame.pack_forget()
+        self.replayhub_frame.pack_forget()
         self.replays_frame.pack_forget()
         self.telemetry_frame.pack_forget()
         self.replay_frame.pack_forget()
@@ -2428,15 +2538,19 @@ class ApexAI:
         elif view == "radio":
             self.radio_frame.pack(fill=tk.BOTH, expand=True)
             self._set_active_btn(self.btn_radio)
-        elif view == "replays":
-            self.replays_frame.pack(fill=tk.BOTH, expand=True)
+        elif view in ("replays", "replay"):
+            # Both replay modes live under the single REPLAYS tab: show
+            # the shared hub chrome, then only the half being asked for.
+            self.replayhub_frame.pack(fill=tk.BOTH, expand=True)
+            if view == "replays":
+                self.replays_frame.pack(fill=tk.BOTH, expand=True)
+            else:
+                self.replay_frame.pack(fill=tk.BOTH, expand=True)
             self._set_active_btn(self.btn_replays)
+            self._set_active_subtab(view)
         elif view == "telemetry":
             self.telemetry_frame.pack(fill=tk.BOTH, expand=True)
             self._set_active_btn(self.btn_telemetry)
-        elif view == "replay":
-            self.replay_frame.pack(fill=tk.BOTH, expand=True)
-            self._set_active_btn(self.btn_replay)
 
     def _on_show_viz(self):
         if self._current_view == "viz":
@@ -2460,20 +2574,45 @@ class ApexAI:
         self._switch_to_view("radio")
 
     def _on_show_replays(self):
-        if self._current_view == "replays":
+        """05 REPLAYS – opens whichever half was last used."""
+        if self._current_view in ("replays", "replay"):
             self._switch_to_view("predictions")
             return
-        # Lazy-build: only construct the widget tree the first time
-        # the user opens the tab.  Subsequent toggles just re-show
-        # the cached widget tree, so flipping in/out is instant.
-        # Schedule loading inside `_build_replays` is dispatched to a
-        # background thread so the UI never freezes while waiting on
-        # disk / network – this prevents subsequent tab clicks from
-        # being lost while the first Replays click is loading.
-        if not self._replays_built:
-            self._build_replays()
-            self._replays_built = True
-        self._switch_to_view("replays")
+        self._show_replay_mode(self._replay_mode)
+
+    def _show_replay_mode(self, mode):
+        """Show one half of the Replays tab: "replay" for the data-driven
+        live session replay, "replays" for the FullRaces broadcast
+        archive.
+
+        Lazy-build: each half only constructs its widget tree the first
+        time it is actually shown, so opening the tab costs nothing for
+        the mode you don't look at.  Subsequent switches just re-show the
+        cached tree and are instant.  Schedule loading inside
+        `_build_replays` is dispatched to a background thread so the UI
+        never freezes while waiting on disk / network – this prevents
+        subsequent tab clicks from being lost while the first Replays
+        click is loading.
+        """
+        if mode == "replay" and not HAS_TELEMETRY:
+            self._set_status("FastF1 is required for the live session "
+                             "replay — showing the broadcast archive")
+            mode = "replays"
+        if mode == "replay":
+            if not self._replay_built:
+                self._build_replay_view()
+                self._replay_built = True
+        else:
+            if not self._replays_built:
+                self._build_replays()
+                self._replays_built = True
+        self._replay_mode = mode
+        self._switch_to_view(mode)
+        # Keep the footer describing the half that is actually showing.
+        if mode == "replays":
+            self._set_status("Race replays · every session, via FullRaces.com")
+        elif self._replay is None:
+            self._set_status("Session Replay · pick a session and hit LOAD")
 
     # ── Team Radio ──
 
@@ -3374,15 +3513,13 @@ class ApexAI:
         for w in self.replays_frame.winfo_children():
             w.destroy()
 
-        # Header row
+        # Header row.  The tab title lives on the Replays hub header, so
+        # this row carries only the strapline plus the season controls.
         top = tk.Frame(self.replays_frame, bg=BG)
         top.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(top, text="RACE REPLAYS",
-                 font=("Helvetica Neue", 16, "bold"),
-                 fg=GOLD, bg=BG).pack(side=tk.LEFT)
         tk.Label(top, text="Watch every session – powered by FullRaces.com",
                  font=("Helvetica Neue", 11), fg=MUTED, bg=BG
-                 ).pack(side=tk.LEFT, padx=(16, 0), pady=(3, 0))
+                 ).pack(side=tk.LEFT, pady=(3, 0))
 
         # Year selector lives on the right of the header.
         right = tk.Frame(top, bg=BG)
@@ -4292,7 +4429,7 @@ class ApexAI:
         dpi = 100
         w_in = self._tel_fig_width_in(dpi)
 
-        fig = plt.figure(figsize=(w_in, 6.6), facecolor=BG, dpi=dpi)
+        fig = plt().figure(figsize=(w_in, 6.6), facecolor=BG, dpi=dpi)
         gs = fig.add_gridspec(5, 1, height_ratios=[3.0, 1.7, 1.3, 1.0, 1.2],
                               hspace=0.14, left=0.065, right=0.985,
                               top=0.965, bottom=0.075)
@@ -4367,7 +4504,7 @@ class ApexAI:
         dpi = 100
         w_in = self._tel_fig_width_in(dpi)
 
-        fig = plt.figure(figsize=(w_in, 3.1), facecolor=BG, dpi=dpi)
+        fig = plt().figure(figsize=(w_in, 3.1), facecolor=BG, dpi=dpi)
         gs = fig.add_gridspec(1, 2, width_ratios=[1.05, 1.6], wspace=0.14,
                               left=0.02, right=0.985, top=0.88, bottom=0.16)
         ax_map = fig.add_subplot(gs[0])
@@ -4432,40 +4569,23 @@ class ApexAI:
             fig.savefig(buf, format="png", facecolor=fig.get_facecolor(),
                         dpi=fig.dpi)
         finally:
-            plt.close(fig)
+            plt().close(fig)
         buf.seek(0)
         return ImageTk.PhotoImage(Image.open(buf).convert("RGB"))
 
     # ── 07 · Session replay ──
 
-    def _on_show_replay(self):
-        if self._current_view == "replay":
-            self._switch_to_view("predictions")
-            return
-        if not HAS_TELEMETRY:
-            self._set_status("FastF1 is required for session replay "
-                             "(pip install -r requirements.txt)")
-            return
-        if not self._replay_built:
-            self._build_replay_view()
-            self._replay_built = True
-        self._switch_to_view("replay")
-        if self._replay is None:
-            self._set_status("Session Replay · pick a session and hit LOAD")
-
     def _build_replay_view(self):
+        # The tab title lives on the Replays hub header; this view starts
+        # straight in on its own controls.
         for w in self.replay_frame.winfo_children():
             w.destroy()
 
-        top = tk.Frame(self.replay_frame, bg=BG)
-        top.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(top, text="SESSION REPLAY",
-                 font=("Helvetica Neue", 16, "bold"),
-                 fg=GOLD, bg=BG).pack(side=tk.LEFT)
-        tk.Label(top, text="Replay any session — live track map, timing "
-                           "screen and telemetry",
-                 font=("Helvetica Neue", 11), fg=MUTED, bg=BG
-                 ).pack(side=tk.LEFT, padx=(14, 0), pady=(3, 0))
+        tk.Label(self.replay_frame,
+                 text="Replay any session — live track map, timing "
+                      "screen and telemetry",
+                 font=("Helvetica Neue", 11), fg=MUTED, bg=BG,
+                 ).pack(anchor="w", pady=(0, 4))
 
         picker_row = tk.Frame(self.replay_frame, bg=BG)
         picker_row.pack(fill=tk.X, pady=(4, 0))

@@ -61,10 +61,10 @@ scrubbable data-driven replay of any session since 2018.
   latest completed weekend.
 - **Racing-console GUI** (`app.py`) — Tk + PIL interface styled like a
   steering-wheel / pit-wall console: a telemetry header cluster with a
-  pulsing SYS LED, live session clock, and model/accuracy readouts; seven
+  pulsing SYS LED, live session clock, and model/accuracy readouts; six
   numbered console-button tabs (*01 Predict*, *02 Backtest*,
-  *03 Visualization*, *04 Team Radio*, *05 Replays*, *06 Telemetry*,
-  *07 Session Replay*) with red engaged
+  *03 Visualization*, *04 Team Radio*, *05 Replays*, *06 Telemetry*)
+  with red engaged
   light-bars; monospace telemetry fonts throughout; a carbon-fiber cap
   strip; and a timing-bar footer — plus a one-click *Refresh* to
   retrain on the latest data.
@@ -88,15 +88,31 @@ scrubbable data-driven replay of any session since 2018.
     `last_predictions.pkl`) is stamped with a `MODEL_VERSION` so a
     relaunch on a bumped model rebuilds automatically and a relaunch
     on the same version is instantaneous.
+  - **Nothing heavy on the launch path** — the console paints from the
+    prediction cache (plain data, ~8 KB) while the expensive pieces load
+    on demand: the 6 MB fitted ensemble is unpickled on the first click
+    that needs it (on a worker thread, behind a *Warming up* status),
+    sklearn is imported only inside the functions that build or score a
+    model, and `matplotlib.pyplot` only when the first chart is drawn.
+    Warm launch to a populated console: **~5 s, down from ~8.5 s**, with
+    sklearn never loaded at all unless you ask for something that needs
+    it.
 - **Full-race team radio** (`radio_fia.py`) — radio clips are fetched
   directly from the FIA livetiming archive (with OpenF1 as a fallback)
   and each clip is mapped to its lap number by matching its capture
   timestamp against the race event log. Plays back through
   `playsound3`.
-- **Race Replays** — every session of every round, deep-linked to
-  [fullraces.com](https://fullraces.com). Pick a season, click *Race* /
-  *Qualifying* / *Sprint* / *Sprint Quali* / *Practice* and the
-  replay opens in your default browser.
+- **Replays** (*05 Replays*) — one tab, two ways to watch a session
+  back, picked with the *LIVE SESSION* / *BROADCAST ARCHIVE* switch
+  under the title:
+  - **Broadcast archive** — every session of every round, deep-linked to
+    [fullraces.com](https://fullraces.com). Pick a season, click *Race* /
+    *Qualifying* / *Sprint* / *Sprint Quali* / *Practice* and the
+    replay opens in your default browser.
+  - **Live session** — the data-driven replay described below.
+
+  The tab reopens on whichever half you used last, and each half is
+  built lazily on first view.
 - **Telemetry overlay** (`telemetry.py` + *06 Telemetry*) — put any two
   laps side by side on a shared distance axis: speed, throttle, brake,
   DRS and gear traces, a running time delta, and a mini-sector
@@ -105,9 +121,18 @@ scrubbable data-driven replay of any session since 2018.
   have to come from the same session — **lap vs lap**, **compound vs
   compound** and **year vs year** are all the same feature. Turn off
   *LINK SESSIONS* to reach across weekends and seasons.
-- **Session replay** (*07 Session Replay*) — a real, data-driven replay
-  of any session from 2018 onwards, rebuilt from FastF1's position and
-  car-telemetry streams:
+  - Laps are aligned on **fraction of the lap**, not raw metres. FastF1
+    integrates its `Distance` channel from the speed trace, and that
+    integration drifts 10 – 15 % between laps of the same circuit, so
+    raw metres would line one lap's turn 8 up against the other's turn
+    10. Each lap's time axis is also anchored to its official lap time,
+    because the car-data slice stops a little short of the timing beam
+    by a different amount every lap. Together those two corrections are
+    what make the closing delta equal the real gap between the two lap
+    times rather than being tens of seconds out.
+- **Session replay** (*05 Replays → LIVE SESSION*) — a real, data-driven
+  replay of any session from 2018 onwards, rebuilt from FastF1's position
+  and car-telemetry streams:
   - **Live track map** traced from the session's own position data, with
     numbered corners and every car moving in real time.
   - **Timing screen** with running order, gap to the leader, current lap,
@@ -150,20 +175,21 @@ Click **Predict Next Race** to fetch data, train the model, and view
 the podium card + win probabilities for the next round. From there:
 
 - **Backtest All Races** — Aggregate accuracy across 2022 – present
-  with a per-season breakdown card (~28 s on a multi-core Mac).
+  with a per-season breakdown card (~28 s on a multi-core Mac; much
+  slower on Windows — see [`docs/PRD.md`](docs/PRD.md) F2.4).
 - **Race Visualization** — Animated track map with MOM zones, podium
   trophies, and circuit-specific ambience.
 - **Team Radio** — Browse and play back full-race radio clips for any
   driver, lap-mapped from the FIA archive.
-- **Race Replays** — One-click links to FullRaces.com for every
-  session of every round, by season.
+- **Replays** — Two modes behind one tab. *LIVE SESSION*: pick a session
+  and hit *Load Replay*; the first load downloads its telemetry stream (a
+  minute or so on a race), after that it comes straight from
+  `replay_cache/`. *BROADCAST ARCHIVE*: one-click links to FullRaces.com
+  for every session of every round, by season.
 - **Telemetry** — Pick a season, round and session, then a driver and
   lap on each side, and hit *Compare Laps*. Leave *LINK SESSIONS* on to
   compare two drivers in the same session; turn it off to compare across
   sessions or seasons.
-- **Session Replay** — Pick a session and hit *Load Replay*. The first
-  load for a session downloads its telemetry stream (a minute or so on a
-  race); after that it comes straight from `replay_cache/`.
 - **F1 / ApexAI logo (header)** — Click anywhere on the brand mark to
   jump back to the predictions view.
 
@@ -192,8 +218,8 @@ at small sizes (grid rows, podium) for legibility.
 ## Project layout
 
 ```
-app.py            Tk + PIL desktop app (GUI, viz, radio, replays,
-                  telemetry overlay, session replay)
+app.py            Tk + PIL desktop app (GUI, viz, radio, replays hub,
+                  telemetry overlay)
 prediction.py     Data ingest, feature engineering, model training,
                   caching, singleton enforcement, and inference
 telemetry.py      Telemetry + session-replay data layer: lap traces,

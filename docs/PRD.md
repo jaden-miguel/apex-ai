@@ -1,18 +1,20 @@
 # ApexAI — Product Requirements Document
 
-> Last updated: July 9, 2026 (mid-season build, model v5)
+> Last updated: July 30, 2026 (mid-season build, model v6)
 
 ## 1. Overview
 
 **ApexAI** is a desktop application that predicts Formula 1 race
-results using a Gradient Boosting Classifier trained on five seasons of
-race history (2022 – 2026 mid-season). The user opens the app, hits one
-button, and gets calibrated win probabilities for the next race plus a
-broadcast-style visualization, the full race radio, and one-click
-replays of every session of every round.
+results using a three-model soft-voting ensemble trained on five seasons
+of race history (2022 – 2026 mid-season). The user opens the app, hits
+one button, and gets calibrated win probabilities for the next race plus
+a broadcast-style visualization, the full race radio, a lap-vs-lap
+telemetry overlay, and replays — both a data-driven session replay
+rebuilt from the timing feed and one-click links to the broadcast
+archive.
 
 The product is a single-binary, offline-friendly Python desktop app
-(Tk + PIL) — no servers, no accounts, no telemetry.
+(Tk + PIL) — no servers, no accounts, no usage tracking.
 
 ## 2. Problem Statement
 
@@ -42,10 +44,16 @@ need to follow the race.
 - **G3.** Animated, broadcast-quality circuit visualization with the
   predicted podium and circuit-specific ambient theming.
 - **G4.** First-class access to **team radio** (full race, lap-mapped)
-  and **race replays** for every session of every round, without
-  leaving the app.
+  and **replays** for every session of every round, without leaving the
+  app.
 - **G5.** Single-instance enforcement so the app never accidentally
   stacks duplicate windows.
+- **G6.** **Lap-accurate telemetry comparison** — any two laps, from any
+  two sessions, on a shared axis, with a closing delta that agrees with
+  the two lap times to the millisecond.
+- **G7.** **Launch is never blocked by work the first screen doesn't
+  need.** The console paints from cache; heavy imports (sklearn,
+  matplotlib) and the fitted model load on demand, off the launch path.
 
 ### 3.2 Non-goals
 
@@ -70,8 +78,8 @@ need to follow the race.
 ┌─────────────────── app.py (Tk + PIL) ──────────────────┐
 │  Header (F1 wordmark — clickable home button)          │
 │  Tab bar:  Predict · Backtest · Visualization ·         │
-│            Team Radio · Race Replays · Telemetry ·      │
-│            Session Replay · Refresh                     │
+│            Team Radio · Replays · Telemetry · Refresh   │
+│            (Replays = Live Session | Broadcast Archive) │
 │                                                        │
 │  ┌──── Predictions panel ───┐ ┌──── Insight panel ───┐ │
 │  │  Podium card + grid      │ │ Model stats          │ │
@@ -147,7 +155,13 @@ need to follow the race.
 - **F2.3.** Per-season breakdown card with year-level hit rate so users
   can see if the model trends up or down by season.
 - **F2.4.** Backtest must complete in **≤ 60 s** on a multi-core Mac
-  (currently ~28 s for 96 races).
+  (~28 s for 96 races). **This target is Mac-only today.** Measured on a
+  Windows 10 desktop the same 102-race walk-forward runs at roughly one
+  race per 70 s — about two hours end to end — because `joblib`'s loky
+  backend spawns (rather than forks) a worker per race and each spawn
+  re-imports the stack and re-fits three ensemble members. The run is
+  correct and reports progress throughout; it is the wall-clock target
+  that does not hold off-Mac. Tracked as a known gap.
 - **F2.5.** Running backtest does NOT clobber the active prediction —
   Visualization, Replays, and Radio remain available throughout.
 - **F2.6.** Backtest results scroll cleanly via mousewheel anywhere on
@@ -186,9 +200,14 @@ need to follow the race.
 - **F4.3.** Filter clips by driver; play sequentially with a now-playing
   bar and waveform animation; stop on tab switch.
 
-### 6.5 Race Replays (NEW)
+### 6.5 Replays — Broadcast Archive
 
-- **F5.1.** Tab listing every round of the selected season — round
+One of the two modes behind the **Replays** tab (see 6.7 for the other).
+A segmented **LIVE SESSION / BROADCAST ARCHIVE** switch under the tab
+title picks between them; the tab reopens on whichever mode was used
+last, and each mode is built lazily the first time it is shown.
+
+- **F5.1.** Lists every round of the selected season — round
   badge, race name, date, "upcoming" flag for unraced weekends.
 - **F5.2.** Per-row session buttons: **Race · Qualifying · Sprint ·
   Sprint Quali · Practice**.
@@ -211,6 +230,18 @@ need to follow the race.
 - **F6.3.** Laps are aligned on **distance around the lap**, not on
   wall-clock, which is what makes lap-vs-lap, compound-vs-compound and
   year-vs-year the same code path.
+  - Alignment is on **fraction of the lap**, not raw metres. FastF1
+    derives its `Distance` channel by integrating the speed trace, and
+    that integration drifts several percent per lap — two laps of the
+    same circuit in the same race routinely report totals 10 – 15 %
+    apart. Aligning on raw metres would line one lap's turn 8 up against
+    the other's turn 10.
+  - Each lap's time axis is anchored to its **official lap time**. The
+    car-data slice starts and ends on telemetry samples rather than on
+    the timing beam, so a raw trace covers slightly less than the whole
+    lap — by a different amount per lap. The correction is sub-1 % and
+    is what makes F6.4's closing delta match the lap times shown beside
+    it.
 - **F6.4.** Rendered output:
   - Summary cards per lap: lap time, event/session/lap, tyre compound
     + age, top speed, average speed, wide-open-throttle %, braking %.
@@ -226,12 +257,16 @@ need to follow the race.
   so the traces stay distinguishable.
 - **F6.6.** Comparing laps from different circuits is permitted but
   flagged with an inline warning, since the distance axis then only
-  lines up by length.
+  lines up by length. The check keys on the **circuit name**; measured
+  lap length is only a fallback when a name is missing, because
+  integration drift (F6.3) makes length useless as a discriminator.
 - **F6.7.** All loading happens on worker threads with progress
   reported inline; stale results are discarded if the selection moves
   on while a fetch is in flight.
 
-### 6.7 Session Replay (NEW)
+### 6.7 Replays — Live Session
+
+The data-driven half of the **Replays** tab (see 6.5 for the switch).
 
 - **F7.1.** Season → round → session picker, restricted to **2018 and
   later** because FastF1 carries no car/position telemetry before then.
@@ -273,13 +308,38 @@ need to follow the race.
 - **F8.2.** Hover affordance: brand mark dims/brightens to telegraph
   that it's interactive.
 
-### 6.9 Singleton
+### 6.9 Launch Path
 
-- **F9.1.** Launching `app.py` while another instance is already
+Launch must show a usable console, not a spinner. Everything the first
+screen does not need is deferred:
+
+- **F9.1.** `load_last_result()` rehydrates the cached prediction from
+  `last_predictions.pkl` (plain data, ~8 KB) and records only *whether*
+  a fitted model exists on disk. It never unpickles the model itself.
+- **F9.2.** The fitted ensemble (`model_cache.pkl`, ~6 MB) is loaded by
+  `load_cached_model()` on first use and memoised. Unpickling it pulls
+  the whole of sklearn into the process (~3.5 s), which is why it stays
+  off the launch path. The load runs on a worker thread behind a
+  *"Warming up the cached model…"* status so the console never freezes.
+- **F9.3.** sklearn is imported inside the two functions that need it
+  (`_build_pipeline`, holdout scoring), never at module scope.
+- **F9.4.** `matplotlib.pyplot` (~1.5 s) is imported on first chart
+  draw via a lazy `plt()` accessor.
+- **F9.5.** The launch feature-importance chart is drawn on a short
+  timer rather than inline, so the window maps first and the chart fills
+  in behind it. (`after_idle` is not sufficient — idle callbacks run in
+  the same cycle that first maps the window.)
+- **F9.6.** Net effect: **~8.5 s → ~5 s** to a visible, populated
+  console on a warm cache, with sklearn no longer loaded at all unless
+  the user asks for something that needs it.
+
+### 6.10 Singleton
+
+- **F10.1.** Launching `app.py` while another instance is already
   running kills the prior PID via `SIGTERM` (escalates to `SIGKILL`
   after a 2 s grace period) and claims an exclusive lockfile
   (`.apex_ai.lock`).
-- **F9.2.** Sweep the OS process list for any *other* python process
+- **F10.2.** Sweep the OS process list for any *other* python process
   whose command line points at `app.py`, not just the lockfile PID,
   so stale instances from terminals or IDE runs are also reaped.
 
@@ -288,9 +348,9 @@ need to follow the race.
 | Category | Target |
 |---|---|
 | **Cold start (first launch, no caches)** | ≤ 3 min including data download |
-| **Warm start (cache hits)** | ≤ 5 s to interactive |
-| **Predict next race (warm)** | ≤ 30 s total |
-| **Backtest 96 races** | ≤ 60 s (currently ~28 s) |
+| **Warm start (cache hits)** | ≤ 5 s to a visible, populated console (measured ~5.0 – 5.9 s; was ~8.3 – 9.8 s before the launch-path deferrals of 6.9) |
+| **Predict next race (warm)** | ≤ 30 s total; the first click after launch also pays a one-off ~3 s model warm-up on a worker thread |
+| **Backtest 96 races** | ≤ 60 s on a multi-core Mac (~28 s). Not met on Windows — measured ≈ 70 s *per race*; see F2.4 |
 | **Visualization frame rate** | 30 fps sustained on M-series Macs |
 | **Replays tab open** | ≤ 200 ms perceived latency |
 | **Telemetry comparison (session cached)** | ≤ 3 s from *Compare Laps* to rendered traces |

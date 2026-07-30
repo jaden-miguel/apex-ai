@@ -908,6 +908,17 @@ def lap_telemetry(session, abbr: str, lap_number: Optional[int] = None,
     lt = lap.get("LapTime")
     lt_s = None if lt is None or pd.isna(lt) else float(
         pd.Timedelta(lt).total_seconds())
+
+    # Anchor the time axis to the official lap time.  The car-data slice
+    # for a lap starts and ends on telemetry samples, not on the timing
+    # beam, so the trace covers slightly less than the whole lap — and by a
+    # different amount for every lap (0.1 s for one car, 0.45 s for the next
+    # in the same race).  Left alone, that turns into a spurious few tenths
+    # in any lap-to-lap delta.  Stretching `elapsed` onto the real lap time
+    # is a sub-1 % correction that makes the closing delta agree with the
+    # lap times shown beside it.
+    if lt_s and len(elapsed_grid) and elapsed_grid[-1] > 0:
+        elapsed_grid = elapsed_grid * (lt_s / float(elapsed_grid[-1]))
     comp = lap.get("Compound")
     comp = None if (comp is None or pd.isna(comp)) else str(comp)
     team = str(lap.get("Team") or "")
@@ -977,22 +988,37 @@ def compare_laps(ref: LapTelemetry, other: LapTelemetry,
                  minisectors: int = DEFAULT_MINISECTORS) -> Comparison:
     """Align two laps on distance and derive the delta + sector dominance.
 
-    The laps do not need to share a session — only a circuit.  We clip to
-    the shorter of the two distance traces so a lap whose telemetry starts
-    slightly late doesn't drag the comparison off the end.
+    The laps do not need to share a session — only a circuit.
+
+    Alignment is by *fraction of the lap*, not by raw metres.  FastF1
+    derives `Distance` by integrating the speed channel, and that
+    integration drifts by several percent from lap to lap: two laps of the
+    same circuit in the same race routinely report totals 10–15 % apart.
+    Comparing raw metres would then line lap A's exit of turn 8 up against
+    lap B's turn 10, and the closing delta would report a double-digit gap
+    between laps a tenth apart.  Normalising each lap to its own length
+    makes the two axes commensurate, and makes the delta at the end of the
+    lap equal the real lap-time difference.
+
+    The shared axis is rendered back onto the mean of the two lengths so
+    the charts still read in metres.
     """
-    max_d = min(float(ref.distance[-1]), float(other.distance[-1]))
-    if max_d <= 0:
+    ref_total = float(ref.distance[-1])
+    oth_total = float(other.distance[-1])
+    if ref_total <= 0 or oth_total <= 0:
         raise ValueError("Laps have no overlapping distance to compare.")
 
-    grid = np.linspace(0.0, max_d, LAP_GRID_POINTS)
-    ref_t = np.interp(grid, ref.distance, ref.elapsed)
-    oth_t = np.interp(grid, other.distance, other.elapsed)
+    nominal = 0.5 * (ref_total + oth_total)
+    frac = np.linspace(0.0, 1.0, LAP_GRID_POINTS)
+    grid = frac * nominal
+    ref_t = np.interp(frac * ref_total, ref.distance, ref.elapsed)
+    oth_t = np.interp(frac * oth_total, other.distance, other.elapsed)
     delta = oth_t - ref_t
 
-    edges = np.linspace(0.0, max_d, minisectors + 1)
-    ref_at = np.interp(edges, ref.distance, ref.elapsed)
-    oth_at = np.interp(edges, other.distance, other.elapsed)
+    edge_frac = np.linspace(0.0, 1.0, minisectors + 1)
+    edges = edge_frac * nominal
+    ref_at = np.interp(edge_frac * ref_total, ref.distance, ref.elapsed)
+    oth_at = np.interp(edge_frac * oth_total, other.distance, other.elapsed)
     ref_seg = np.diff(ref_at)
     oth_seg = np.diff(oth_at)
     seg_delta = oth_seg - ref_seg
@@ -1016,16 +1042,19 @@ def compare_laps(ref: LapTelemetry, other: LapTelemetry,
 def _same_circuit(a: LapTelemetry, b: LapTelemetry) -> bool:
     """Distance-aligned comparison is only meaningful on the same track.
 
-    Circuits get resurfaced and occasionally re-profiled between seasons,
-    so we compare the location name and allow a few percent of lap-length
-    drift rather than demanding an exact match.
+    The circuit *name* is the reliable signal here.  Measured lap length is
+    not: FastF1's speed-integrated `Distance` drifts 10–15 % between laps
+    of the same circuit, so a length test tight enough to catch a genuinely
+    different track would flag most same-track pairs as well.  Length is
+    therefore only consulted as a fallback when a name is missing, at a
+    tolerance loose enough to clear that integration drift.
     """
-    if a.circuit and b.circuit and a.circuit.strip().lower() != b.circuit.strip().lower():
-        return False
+    if a.circuit and b.circuit:
+        return a.circuit.strip().lower() == b.circuit.strip().lower()
     la, lb = float(a.distance[-1]), float(b.distance[-1])
     if la <= 0 or lb <= 0:
         return False
-    return abs(la - lb) / max(la, lb) < 0.05
+    return abs(la - lb) / max(la, lb) < 0.25
 
 
 # ---------------------------------------------------------------------------

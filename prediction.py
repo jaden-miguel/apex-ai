@@ -1,6 +1,11 @@
 """
 Core prediction logic. Returns structured data for the GUI.
 """
+# Annotations are never evaluated at runtime here, so deferring them lets
+# the sklearn-typed signatures below (`-> Pipeline`) stay readable while
+# sklearn itself is imported lazily — see `_build_pipeline`.
+from __future__ import annotations
+
 import atexit
 import datetime as _dt
 import hashlib
@@ -24,16 +29,18 @@ else:
 import numpy as np
 import fastf1
 import pandas as pd
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSeriesSplit
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.ensemble import (
-    GradientBoostingClassifier,
-    HistGradientBoostingClassifier,
-    RandomForestClassifier,
-    VotingClassifier,
-)
+
+# sklearn is deliberately NOT imported here.  It costs ~3.5 s to import
+# and is only needed when a model is actually built or scored — showing
+# the cached predictions on launch never touches it.  The two places that
+# need it (`_build_pipeline` and the holdout scoring inside
+# `run_predictions`) import it locally, which keeps that cost off the
+# launch path.  Unpickling a cached model still works: pickle imports the
+# classes it needs on its own.
+#
+# `RandomizedSearchCV` / `TimeSeriesSplit` were imported here too but had
+# no remaining call sites — v6 fits a fixed configuration rather than
+# searching — so they are gone rather than moved.
 
 # Suppress fastf1 verbose logging
 logging.getLogger("fastf1").setLevel(logging.WARNING)
@@ -207,17 +214,39 @@ def load_last_result() -> dict | None:
     if result.get("_model_version") != MODEL_VERSION:
         return None
 
-    # Re-attach the model so race cycling (`_advance_and_predict`) still
-    # works after a relaunch.
-    model_path = _BASE / "model_cache.pkl"
-    if model_path.exists():
-        try:
-            with open(model_path, "rb") as f:
-                cached = pickle.load(f)
-            result["_model"] = cached.get("model")
-        except Exception:
-            pass
+    # Note that a re-usable fitted model exists *without* unpickling it.
+    # Race cycling (`_advance_and_predict`) needs the model, but launch
+    # does not, and the unpickle is expensive — see `load_cached_model`.
+    result["_has_model"] = (_BASE / "model_cache.pkl").exists()
     return result
+
+
+_MODEL_UNSET = object()
+_cached_model = _MODEL_UNSET
+
+
+def load_cached_model():
+    """Unpickle the fitted ensemble from `model_cache.pkl`, memoised.
+
+    Kept out of `load_last_result` on purpose: the model is a ~6 MB
+    sklearn pipeline whose unpickle drags the whole of sklearn into the
+    process (~3.5 s), and a launch that just redisplays the cached
+    prediction never needs it.  The first action that actually re-scores
+    a lineup pays that cost instead — off the launch path.
+
+    Returns None if there is no cached model or it cannot be read.
+    """
+    global _cached_model
+    if _cached_model is _MODEL_UNSET:
+        _cached_model = None
+        model_path = _BASE / "model_cache.pkl"
+        if model_path.exists():
+            try:
+                with open(model_path, "rb") as f:
+                    _cached_model = pickle.load(f).get("model")
+            except Exception:
+                _cached_model = None
+    return _cached_model
 
 
 # ---------------------------------------------------------------------------
@@ -1095,6 +1124,16 @@ def _build_pipeline() -> Pipeline:
     walk-forward top-1 accuracy because the members disagree exactly on
     the marginal races where a single model's variance flips the pick.
     """
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.compose import ColumnTransformer
+    from sklearn.pipeline import Pipeline
+    from sklearn.ensemble import (
+        GradientBoostingClassifier,
+        HistGradientBoostingClassifier,
+        RandomForestClassifier,
+        VotingClassifier,
+    )
+
     categorical = ["Abbreviation", "TeamName"]
     numeric = [f for f in FEATURES if f not in categorical]
 
@@ -1409,6 +1448,8 @@ def run_predictions(progress_callback=None, target_year=2026):
         ]
 
         # Accuracy
+        from sklearn.model_selection import train_test_split
+
         X = df[features]
         y = df["Winner"]
         _, X_te, _, y_te = train_test_split(
