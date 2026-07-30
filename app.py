@@ -4032,8 +4032,8 @@ class ApexAI:
             return  # selection moved on while we were loading
         st = self._picker(key)
         if err or not drivers:
-            self._tel_say(f"No data for that session ({err})" if err
-                          else "No drivers found in that session")
+            self._tel_say(str(err) if err
+                          else "That session loaded, but lists no drivers.")
             return
         st["session"] = session
         st["driver_info"] = {d.abbr: d for d in drivers}

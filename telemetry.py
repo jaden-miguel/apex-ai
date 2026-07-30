@@ -613,10 +613,54 @@ def load_session(year: int, round_no: int, code: str,
          else "Loading timing + telemetry (first time can take a minute)…")
     session.load(laps=True, telemetry=with_telemetry,
                  weather=False, messages=False)
+    _assert_loaded(session, year, round_no, code, with_telemetry)
 
     with _SESSION_LOCK:
         _SESSION_MEM[key] = (session, with_telemetry)
     return session
+
+
+def _assert_loaded(session, year: int, round_no: int, code: str,
+                   with_telemetry: bool) -> None:
+    """Fail loudly when `Session.load()` quietly came back empty.
+
+    FastF1 wraps each loader in `@soft_exceptions`, so a network failure or
+    a session the feed has no data for is logged as a warning and `load()`
+    returns normally with nothing attached.  Every later access then dies
+    on `DataNotLoadedError`, which surfaces to the user as either a bare
+    "no drivers found" or FastF1's own "see Session.load" jargon — neither
+    of which says what actually went wrong.  Check once, here, and say it
+    plainly.
+    """
+    label = f"{SESSION_LABELS.get(code, code)} · {year} round {round_no}"
+    try:
+        laps = session.laps
+    except Exception:
+        raise ValueError(
+            f"No timing data came back for {label}. The F1 timing feed was "
+            f"unreachable, or it has no data for this session yet."
+        ) from None
+    if laps is None or not len(laps):
+        raise ValueError(
+            f"{label} returned an empty timing sheet — the session may not "
+            f"have run yet."
+        )
+    if with_telemetry and not (_safe_stream(session, "pos_data")
+                               or _safe_stream(session, "car_data")):
+        raise ValueError(
+            f"Timing data for {label} loaded, but its car telemetry stream "
+            f"did not. Telemetry only exists from 2018 onwards, and very "
+            f"recent sessions can take a few hours to be published."
+        )
+
+
+def _safe_stream(session, name: str):
+    """`session.pos_data` / `car_data` raise when unloaded rather than
+    returning None, so a plain getattr default is not enough."""
+    try:
+        return getattr(session, name, None)
+    except Exception:
+        return None
 
 
 def session_display_name(session) -> str:
@@ -1115,8 +1159,8 @@ def build_replay(session, hz: float = DEFAULT_REPLAY_HZ,
             except Exception:
                 pass
 
-    pos_data = getattr(session, "pos_data", None) or {}
-    car_data = getattr(session, "car_data", None) or {}
+    pos_data = _safe_stream(session, "pos_data") or {}
+    car_data = _safe_stream(session, "car_data") or {}
     if not pos_data:
         raise ValueError(
             "This session has no position data — replay needs the car "
