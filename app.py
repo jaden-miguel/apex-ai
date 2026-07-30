@@ -60,6 +60,16 @@ from team_colors import TEAM_COLORS
 from team_logos import load_logo
 from track_layouts import get_track
 
+# Telemetry + session-replay data layer.  Imported defensively so a missing
+# FastF1 build degrades to "those two tabs are unavailable" rather than
+# taking the whole app down on launch.
+try:
+    import telemetry as teldata
+    HAS_TELEMETRY = True
+except Exception:
+    teldata = None
+    HAS_TELEMETRY = False
+
 try:
     import f1radio
     HAS_F1RADIO = True
@@ -1160,6 +1170,20 @@ class ApexAI:
         self._race_idx = -1
         self._season_driver_pts = {}
         self._season_team_pts = {}
+        # Session pickers (season / round / session) are shared between the
+        # Telemetry and Replay tabs; each one namespaces its widgets here.
+        self._pickers = {}
+        self._telemetry_built = False
+        self._replay_built = False
+        self._replay = None          # loaded telemetry.Replay
+        self._replay_playing = False
+        self._replay_frame = 0.0
+        self._replay_speed = 1.0
+        self._replay_after = None
+        self._replay_focus = None    # driver abbreviation the HUD follows
+        self._replay_resize_job = None
+        self._replay_last_size = (0, 0)
+        self._replay_car_items = {}
         # Telemetry font for the racing-console readouts.  Cascadia Mono
         # ships with Windows Terminal / Win10 1903+; Consolas is on every
         # Windows box; Courier New is the universal fallback.
@@ -1367,13 +1391,23 @@ class ApexAI:
                                            self._on_show_replays, num="05")
         self.btn_replays.pack(side=tk.LEFT, padx=(0, 6))
 
+        self.btn_telemetry = self._make_tab(ctrl, "TELEMETRY",
+                                             self._on_show_telemetry, num="06")
+        self.btn_telemetry.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_replay = self._make_tab(ctrl, "SESSION REPLAY",
+                                          self._on_show_replay, num="07")
+        self.btn_replay.pack(side=tk.LEFT, padx=(0, 6))
+
         # Trailing refresh button is visually quieter (icon-style ↻).
         self.btn_refresh = self._make_tab(ctrl, "↻ REFRESH",
                                            self._on_refresh, secondary=True)
         self.btn_refresh.pack(side=tk.LEFT, padx=(8, 0))
 
         self._all_btns = [self.btn_predict, self.btn_all, self.btn_viz,
-                          self.btn_radio, self.btn_replays, self.btn_refresh]
+                          self.btn_radio, self.btn_replays,
+                          self.btn_telemetry, self.btn_replay,
+                          self.btn_refresh]
 
         # ── Footer status bar (always visible, never truncated) ──
         # Packed at the BOTTOM of the window first so the body fills the
@@ -1418,6 +1452,12 @@ class ApexAI:
         self.replays_frame = tk.Frame(self.root, bg=BG, padx=36, pady=8)
         self._replays_built = False
         self._replays_year = None
+
+        # Telemetry comparison + data-driven session replay (hidden
+        # initially).  Both are lazily built on first open like the tabs
+        # above, so launch time is unaffected.
+        self.telemetry_frame = tk.Frame(self.root, bg=BG, padx=28, pady=8)
+        self.replay_frame = tk.Frame(self.root, bg=BG, padx=20, pady=6)
         self._radio_clips = []
         self._radio_clip_meta = []        # parallel: per-clip {lap, event, dt}
         self._radio_event_log = []        # raw f1radio event_log for the race
@@ -2369,10 +2409,16 @@ class ApexAI:
     def _switch_to_view(self, view):
         self._current_view = view
         self._anim_running = False
+        # Leaving the replay tab pauses playback rather than tearing it
+        # down, so coming back resumes exactly where you left off.
+        if view != "replay":
+            self._replay_pause()
         self.body.pack_forget()
         self.viz_frame.pack_forget()
         self.radio_frame.pack_forget()
         self.replays_frame.pack_forget()
+        self.telemetry_frame.pack_forget()
+        self.replay_frame.pack_forget()
         if view == "predictions":
             self.body.pack(fill=tk.BOTH, expand=True)
             self._set_active_btn(None)
@@ -2385,6 +2431,12 @@ class ApexAI:
         elif view == "replays":
             self.replays_frame.pack(fill=tk.BOTH, expand=True)
             self._set_active_btn(self.btn_replays)
+        elif view == "telemetry":
+            self.telemetry_frame.pack(fill=tk.BOTH, expand=True)
+            self._set_active_btn(self.btn_telemetry)
+        elif view == "replay":
+            self.replay_frame.pack(fill=tk.BOTH, expand=True)
+            self._set_active_btn(self.btn_replay)
 
     def _on_show_viz(self):
         if self._current_view == "viz":
@@ -3555,6 +3607,1474 @@ class ApexAI:
                 border=border,
             )
             btn.pack(side=tk.LEFT, padx=4)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Telemetry & Session Replay
+    # ══════════════════════════════════════════════════════════════════
+    # Two data-driven views built on the FastF1 streams in telemetry.py:
+    #
+    #   06 TELEMETRY      – overlay any two laps on a shared distance axis.
+    #                       Because the alignment is by distance and not by
+    #                       clock, the two laps can come from different
+    #                       sessions or different seasons, which is what
+    #                       makes lap-vs-lap, compound-vs-compound and
+    #                       year-vs-year comparisons all the same feature.
+    #   07 SESSION REPLAY – scrub any session frame-by-frame with a live
+    #                       track map, a timing screen and a telemetry HUD.
+    #
+    # Both hang off the same season / round / session picker below.
+
+    # FastF1 only carries car + position telemetry from 2018 onwards; older
+    # seasons have results but nothing to plot or replay, so the season
+    # selector stops there rather than offering years that always fail.
+    TEL_FIRST_YEAR = 2018
+
+    # Playback rates offered by the replay transport.
+    REPLAY_SPEEDS = (0.5, 1, 2, 4, 8, 16)
+
+    # ── Shared season / round / session picker ──
+
+    def _tel_years(self):
+        return [str(y) for y in
+                range(datetime.now().year, self.TEL_FIRST_YEAR - 1, -1)]
+
+    def _picker(self, key):
+        return self._pickers.setdefault(key, {})
+
+    def _build_session_picker(self, parent, key, on_change=None,
+                              round_width=30):
+        """Season / Round / Session combo trio.
+
+        `key` namespaces the widget state on `self._pickers` so the
+        telemetry tab's two independent pickers and the replay tab's
+        picker can all coexist.  `on_change` fires whenever the selection
+        becomes complete (or changes), on the Tk thread.
+        """
+        st = self._picker(key)
+        st["on_change"] = on_change
+        st["rounds"] = {}
+        st["sessions"] = {}
+
+        row = tk.Frame(parent, bg=BG)
+        st["frame"] = row
+
+        tk.Label(row, text="SEASON", font=(self.MONO, 8), fg=MUTED,
+                 bg=BG).pack(side=tk.LEFT, padx=(0, 5))
+        st["year_var"] = tk.StringVar(value=str(datetime.now().year))
+        st["year_cb"] = ttk.Combobox(
+            row, values=self._tel_years(), state="readonly",
+            textvariable=st["year_var"], width=6,
+            font=("Helvetica Neue", 10))
+        st["year_cb"].pack(side=tk.LEFT, padx=(0, 12))
+        st["year_cb"].bind("<<ComboboxSelected>>",
+                           lambda _e, k=key: self._picker_load_rounds(k))
+
+        tk.Label(row, text="ROUND", font=(self.MONO, 8), fg=MUTED,
+                 bg=BG).pack(side=tk.LEFT, padx=(0, 5))
+        st["round_var"] = tk.StringVar(value="")
+        st["round_cb"] = ttk.Combobox(
+            row, values=[], state="readonly",
+            textvariable=st["round_var"], width=round_width,
+            font=("Helvetica Neue", 10))
+        st["round_cb"].pack(side=tk.LEFT, padx=(0, 12))
+        st["round_cb"].bind("<<ComboboxSelected>>",
+                            lambda _e, k=key: self._picker_load_sessions(k))
+
+        tk.Label(row, text="SESSION", font=(self.MONO, 8), fg=MUTED,
+                 bg=BG).pack(side=tk.LEFT, padx=(0, 5))
+        st["sess_var"] = tk.StringVar(value="")
+        st["sess_cb"] = ttk.Combobox(
+            row, values=[], state="readonly",
+            textvariable=st["sess_var"], width=17,
+            font=("Helvetica Neue", 10))
+        st["sess_cb"].pack(side=tk.LEFT)
+        st["sess_cb"].bind("<<ComboboxSelected>>",
+                           lambda _e, k=key: self._picker_notify(k))
+
+        self._picker_load_rounds(key)
+        return row
+
+    def _picker_set_enabled(self, key, enabled):
+        state = "readonly" if enabled else "disabled"
+        st = self._picker(key)
+        for name in ("year_cb", "round_cb", "sess_cb"):
+            cb = st.get(name)
+            if cb is not None:
+                try:
+                    cb.configure(state=state)
+                except tk.TclError:
+                    pass
+
+    def _picker_load_rounds(self, key):
+        """Populate the round list for the selected season, off-thread."""
+        st = self._picker(key)
+        try:
+            year = int(st["year_var"].get())
+        except (ValueError, KeyError):
+            return
+        st["round_cb"].configure(values=["Loading…"])
+        st["round_var"].set("Loading…")
+
+        def work():
+            try:
+                sched = get_event_schedule_cached(year)
+                rows = []
+                today = datetime.now().date()
+                for _, ev in sched.iterrows():
+                    rnd = int(ev["RoundNumber"])
+                    name = str(ev["EventName"])
+                    try:
+                        ev_date = ev["EventDate"].date()
+                    except Exception:
+                        ev_date = None
+                    future = ev_date is not None and ev_date > today
+                    label = f"{rnd:02d} · {name}"
+                    if future:
+                        label += "  (upcoming)"
+                    rows.append((label, rnd))
+                err = None
+            except Exception as exc:
+                rows, err = [], exc
+            self.root.after(0, lambda: self._picker_rounds_ready(
+                key, year, rows, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _picker_rounds_ready(self, key, year, rows, err):
+        st = self._picker(key)
+        # The user may have moved on to another season while we were
+        # fetching; drop the stale result rather than clobbering their
+        # current selection.
+        try:
+            if int(st["year_var"].get()) != year:
+                return
+        except (ValueError, KeyError, tk.TclError):
+            return
+        if err or not rows:
+            st["round_cb"].configure(values=[])
+            st["round_var"].set("")
+            self._set_status(f"Could not load the {year} calendar: {err}"
+                             if err else f"No rounds found for {year}")
+            return
+        st["rounds"] = {label: rnd for label, rnd in rows}
+        labels = [label for label, _ in rows]
+        st["round_cb"].configure(values=labels)
+        # Default to the most recent round that has actually run — that's
+        # the one you almost always want to look at.
+        done = [lb for lb in labels if "(upcoming)" not in lb]
+        st["round_var"].set(done[-1] if done else labels[0])
+        self._picker_load_sessions(key)
+
+    def _picker_load_sessions(self, key):
+        st = self._picker(key)
+        rnd = st["rounds"].get(st["round_var"].get())
+        try:
+            year = int(st["year_var"].get())
+        except (ValueError, KeyError):
+            return
+        if rnd is None:
+            return
+        st["sess_cb"].configure(values=["Loading…"])
+        st["sess_var"].set("Loading…")
+
+        def work():
+            try:
+                avail = teldata.available_sessions(year, rnd)
+            except Exception:
+                avail = [("R", "Race"), ("Q", "Qualifying")]
+            self.root.after(0, lambda: self._picker_sessions_ready(
+                key, year, rnd, avail))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _picker_sessions_ready(self, key, year, rnd, avail):
+        st = self._picker(key)
+        try:
+            if (int(st["year_var"].get()) != year
+                    or st["rounds"].get(st["round_var"].get()) != rnd):
+                return
+        except (ValueError, KeyError, tk.TclError):
+            return
+        st["sessions"] = {label: code for code, label in avail}
+        labels = [label for _, label in avail]
+        st["sess_cb"].configure(values=labels)
+        st["sess_var"].set(labels[0] if labels else "")
+        self._picker_notify(key)
+
+    def _picker_notify(self, key):
+        cb = self._picker(key).get("on_change")
+        if cb:
+            cb()
+
+    def _picker_selection(self, key):
+        """(year, round, session_code) or None if the picker isn't ready."""
+        st = self._picker(key)
+        try:
+            year = int(st["year_var"].get())
+        except (ValueError, KeyError, tk.TclError):
+            return None
+        rnd = st.get("rounds", {}).get(st["round_var"].get())
+        code = st.get("sessions", {}).get(st["sess_var"].get())
+        if rnd is None or code is None:
+            return None
+        return (year, rnd, code)
+
+    def _picker_copy(self, src, dst):
+        """Mirror one picker's selection onto another (LINK mode)."""
+        s, d = self._picker(src), self._picker(dst)
+        if not s.get("year_var") or not d.get("year_var"):
+            return
+        d["rounds"] = dict(s.get("rounds", {}))
+        d["sessions"] = dict(s.get("sessions", {}))
+        d["year_cb"].configure(values=s["year_cb"].cget("values"))
+        d["round_cb"].configure(values=s["round_cb"].cget("values"))
+        d["sess_cb"].configure(values=s["sess_cb"].cget("values"))
+        d["year_var"].set(s["year_var"].get())
+        d["round_var"].set(s["round_var"].get())
+        d["sess_var"].set(s["sess_var"].get())
+
+    # ── 06 · Telemetry comparison ──
+
+    def _on_show_telemetry(self):
+        if self._current_view == "telemetry":
+            self._switch_to_view("predictions")
+            return
+        if not HAS_TELEMETRY:
+            self._set_status("FastF1 is required for telemetry "
+                             "(pip install -r requirements.txt)")
+            return
+        if not self._telemetry_built:
+            self._build_telemetry()
+            self._telemetry_built = True
+        self._switch_to_view("telemetry")
+        self._set_status("Telemetry · pick two laps and hit COMPARE")
+
+    def _build_telemetry(self):
+        for w in self.telemetry_frame.winfo_children():
+            w.destroy()
+
+        top = tk.Frame(self.telemetry_frame, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(top, text="TELEMETRY", font=("Helvetica Neue", 16, "bold"),
+                 fg=GOLD, bg=BG).pack(side=tk.LEFT)
+        tk.Label(top, text="Overlay any two laps — lap vs lap, compound vs "
+                           "compound, year vs year",
+                 font=("Helvetica Neue", 11), fg=MUTED, bg=BG
+                 ).pack(side=tk.LEFT, padx=(16, 0), pady=(3, 0))
+
+        # LINK keeps side B on the same session as side A, which is the
+        # common case (two team-mates in one race).  Unlink it to reach
+        # across sessions and seasons.
+        self._tel_link = tk.BooleanVar(value=True)
+        link = tk.Checkbutton(
+            top, text="LINK SESSIONS", variable=self._tel_link,
+            command=self._tel_link_changed,
+            font=(self.MONO, 8), fg=GRAY, bg=BG, activebackground=BG,
+            activeforeground=WHITE, selectcolor=BG_SURFACE,
+            highlightthickness=0, bd=0, cursor="hand2",
+        )
+        link.pack(side=tk.RIGHT)
+
+        tk.Frame(self.telemetry_frame, bg=F1_RED, height=2).pack(
+            fill=tk.X, pady=(2, 8))
+
+        # -- two lap selectors --
+        self._tel_sides = {}
+        for side, accent in (("a", GOLD), ("b", "#4FA3FF")):
+            self._build_tel_side(self.telemetry_frame, side, accent)
+
+        # -- action row --
+        actions = tk.Frame(self.telemetry_frame, bg=BG)
+        actions.pack(fill=tk.X, pady=(8, 6))
+        self._tel_compare_btn = self._make_btn(
+            actions, "COMPARE LAPS", GOLD, WHITE, self._tel_compare,
+            border=GOLD_GLOW)
+        self._tel_compare_btn.pack(side=tk.LEFT)
+        self._make_btn(actions, "⇄ SWAP", BG_SURFACE, WHITE,
+                       self._tel_swap, border=BORDER).pack(
+            side=tk.LEFT, padx=(8, 0))
+        self._tel_status = tk.Label(
+            actions, text="", font=(self.MONO, 9), fg=MUTED, bg=BG)
+        self._tel_status.pack(side=tk.LEFT, padx=(16, 0))
+
+        # -- scrollable results --
+        body = tk.Frame(self.telemetry_frame, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        self._tel_canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(body, orient="vertical",
+                           command=self._tel_canvas.yview)
+        self._tel_inner = tk.Frame(self._tel_canvas, bg=BG)
+        self._tel_inner.bind(
+            "<Configure>",
+            lambda e: self._tel_canvas.configure(
+                scrollregion=self._tel_canvas.bbox("all")))
+        self._tel_canvas.create_window((0, 0), window=self._tel_inner,
+                                       anchor="nw")
+        self._tel_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tel_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def _wheel(e, c=self._tel_canvas):
+            c.yview_scroll(self._wheel_units(e), "units")
+            return "break"
+
+        for w in (self._tel_canvas, self._tel_inner):
+            w.bind("<MouseWheel>", _wheel)
+        self._tel_wheel = _wheel
+
+        tk.Label(self._tel_inner,
+                 text="Choose a session, then a driver and lap on each side.\n"
+                      "Turn LINK SESSIONS off to compare across sessions or "
+                      "seasons.",
+                 font=("Helvetica Neue", 11), fg=MUTED, bg=BG,
+                 justify=tk.LEFT).pack(anchor="w", pady=24)
+
+        self._tel_link_changed()
+
+    def _build_tel_side(self, parent, side, accent):
+        """One row of the comparison picker: session + driver + lap."""
+        card = tk.Frame(parent, bg=BG_SURFACE,
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill=tk.X, pady=3)
+        inner = tk.Frame(card, bg=BG_SURFACE, padx=10, pady=7)
+        inner.pack(fill=tk.X)
+
+        tk.Frame(inner, bg=accent, width=4, height=26).pack(
+            side=tk.LEFT, padx=(0, 10), fill=tk.Y)
+        tk.Label(inner, text=f"CAR {side.upper()}",
+                 font=(self.MONO, 10, "bold"), fg=accent,
+                 bg=BG_SURFACE).pack(side=tk.LEFT, padx=(0, 14))
+
+        picker_host = tk.Frame(inner, bg=BG_SURFACE)
+        picker_host.pack(side=tk.LEFT)
+        # The picker paints itself on BG; re-parent onto the card colour so
+        # the row reads as a single module.
+        row = self._build_session_picker(
+            picker_host, f"tel_{side}",
+            on_change=lambda s=side: self._tel_session_changed(s),
+            round_width=26)
+        for w in [row] + list(row.winfo_children()):
+            try:
+                if isinstance(w, (tk.Frame, tk.Label)):
+                    w.configure(bg=BG_SURFACE)
+            except tk.TclError:
+                pass
+        row.pack(side=tk.LEFT)
+
+        st = self._picker(f"tel_{side}")
+        tk.Label(inner, text="DRIVER", font=(self.MONO, 8), fg=MUTED,
+                 bg=BG_SURFACE).pack(side=tk.LEFT, padx=(14, 5))
+        st["driver_var"] = tk.StringVar(value="")
+        st["driver_cb"] = ttk.Combobox(
+            inner, values=[], state="readonly", width=6,
+            textvariable=st["driver_var"], font=("Helvetica Neue", 10))
+        st["driver_cb"].pack(side=tk.LEFT)
+        st["driver_cb"].bind(
+            "<<ComboboxSelected>>",
+            lambda _e, s=side: self._tel_driver_changed(s))
+
+        tk.Label(inner, text="LAP", font=(self.MONO, 8), fg=MUTED,
+                 bg=BG_SURFACE).pack(side=tk.LEFT, padx=(12, 5))
+        st["lap_var"] = tk.StringVar(value="")
+        st["lap_cb"] = ttk.Combobox(
+            inner, values=[], state="readonly", width=22,
+            textvariable=st["lap_var"], font=(self.MONO, 9))
+        st["lap_cb"].pack(side=tk.LEFT)
+
+        self._tel_sides[side] = {"card": card, "accent": accent}
+
+    def _tel_link_changed(self):
+        """LINK on: side B follows side A's session and its combos lock."""
+        linked = bool(self._tel_link.get())
+        self._picker_set_enabled("tel_b", not linked)
+        if linked:
+            self._picker_copy("tel_a", "tel_b")
+            self._tel_session_changed("b")
+
+    def _tel_session_changed(self, side):
+        """Session selection changed — reload that side's driver list."""
+        if side == "a" and bool(self._tel_link.get()):
+            self._picker_copy("tel_a", "tel_b")
+            self.root.after(0, lambda: self._tel_load_drivers("b"))
+        self._tel_load_drivers(side)
+
+    def _tel_load_drivers(self, side):
+        key = f"tel_{side}"
+        sel = self._picker_selection(key)
+        if sel is None:
+            return
+        year, rnd, code = sel
+        st = self._picker(key)
+        st["driver_cb"].configure(values=[])
+        st["driver_var"].set("")
+        st["lap_cb"].configure(values=[])
+        st["lap_var"].set("")
+        self._tel_say(f"Loading {code} · {year} round {rnd}…")
+
+        def work():
+            try:
+                session = teldata.load_session(
+                    year, rnd, code, with_telemetry=False,
+                    progress=lambda m: self.root.after(
+                        0, lambda mm=m: self._tel_say(mm)))
+                drivers = teldata.driver_table(session, TEAM_COLORS)
+                err = None
+            except Exception as exc:
+                session, drivers, err = None, [], exc
+            self.root.after(0, lambda: self._tel_drivers_ready(
+                side, year, rnd, code, session, drivers, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tel_drivers_ready(self, side, year, rnd, code, session, drivers, err):
+        key = f"tel_{side}"
+        if self._picker_selection(key) != (year, rnd, code):
+            return  # selection moved on while we were loading
+        st = self._picker(key)
+        if err or not drivers:
+            self._tel_say(str(err) if err
+                          else "That session loaded, but lists no drivers.")
+            return
+        st["session"] = session
+        st["driver_info"] = {d.abbr: d for d in drivers}
+        st["driver_cb"].configure(values=[d.abbr for d in drivers])
+        st["driver_var"].set(drivers[0].abbr)
+        self._tel_driver_changed(side)
+        self._tel_say(f"{len(drivers)} drivers loaded · "
+                      f"{teldata.session_display_name(session)}")
+
+    def _tel_driver_changed(self, side):
+        key = f"tel_{side}"
+        st = self._picker(key)
+        session = st.get("session")
+        abbr = st["driver_var"].get()
+        if session is None or not abbr:
+            return
+        laps = teldata.lap_table(session, abbr)
+        st["laps"] = {lap.label: lap.number for lap in laps}
+        fastest = teldata.fastest_lap_number(session, abbr)
+        labels = ["Fastest lap"] + [lap.label for lap in laps]
+        st["lap_cb"].configure(values=labels)
+        # Default both sides to the fastest lap — the comparison people
+        # reach for first.
+        st["lap_var"].set("Fastest lap")
+        st["fastest"] = fastest
+
+    def _tel_say(self, msg):
+        try:
+            self._tel_status.configure(text=msg)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _tel_swap(self):
+        """Swap the two sides so the delta flips reference."""
+        if bool(self._tel_link.get()):
+            a, b = self._picker("tel_a"), self._picker("tel_b")
+            for field in ("driver_var", "lap_var"):
+                av, bv = a[field].get(), b[field].get()
+                a[field].set(bv)
+                b[field].set(av)
+            # Lap lists are per-driver, so rebuild both after the swap.
+            for side in ("a", "b"):
+                st = self._picker(f"tel_{side}")
+                keep = st["lap_var"].get()
+                self._tel_driver_changed(side)
+                if keep in st["lap_cb"].cget("values"):
+                    st["lap_var"].set(keep)
+            self._tel_compare()
+        else:
+            self._tel_say("Turn LINK SESSIONS on to swap, or re-pick "
+                          "each side manually")
+
+    def _tel_selected_lap(self, side):
+        """(year, round, code, driver, lap_number_or_None) for one side."""
+        key = f"tel_{side}"
+        sel = self._picker_selection(key)
+        st = self._picker(key)
+        abbr = st.get("driver_var").get() if st.get("driver_var") else ""
+        if sel is None or not abbr:
+            return None
+        label = st["lap_var"].get()
+        lap_no = None if label in ("", "Fastest lap") else \
+            st.get("laps", {}).get(label)
+        return (*sel, abbr, lap_no)
+
+    def _tel_compare(self):
+        a = self._tel_selected_lap("a")
+        b = self._tel_selected_lap("b")
+        if a is None or b is None:
+            self._tel_say("Pick a driver on both sides first")
+            return
+        if a == b:
+            self._tel_say("Both sides are the same lap — pick a different "
+                          "driver or lap on one side")
+            return
+
+        self._tel_say("Loading telemetry…")
+        self._set_busy(True)
+
+        def work():
+            try:
+                laps = []
+                for spec in (a, b):
+                    year, rnd, code, abbr, lap_no = spec
+                    session = teldata.load_session(
+                        year, rnd, code, with_telemetry=True,
+                        progress=lambda m: self.root.after(
+                            0, lambda mm=m: self._tel_say(mm)))
+                    laps.append(teldata.lap_telemetry(
+                        session, abbr, lap_no, TEAM_COLORS))
+                comparison = teldata.compare_laps(laps[0], laps[1])
+                err = None
+            except Exception as exc:
+                comparison, err = None, exc
+            self.root.after(
+                0, lambda: self._tel_compare_ready(comparison, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tel_compare_ready(self, comparison, err):
+        self._set_busy(False)
+        if err or comparison is None:
+            self._tel_say(f"Could not build the comparison: {err}")
+            self._set_status(f"Telemetry error: {err}")
+            return
+        self._tel_say("")
+        self._render_telemetry(comparison)
+        ref, oth = comparison.ref, comparison.other
+        self._set_status(
+            f"Telemetry · {ref.short_label} vs {oth.short_label} · "
+            f"{teldata.fmt_delta(comparison.final_delta)}s")
+
+    # ── Telemetry rendering ──
+
+    @staticmethod
+    def _tel_pair_colors(comparison):
+        """Colours for the two traces.
+
+        Team-mates share a livery colour, so if the two are too close to
+        tell apart we keep the reference on the team colour and shift the
+        comparison car onto a light tint of it.
+        """
+        c_a = comparison.ref.color or GOLD
+        c_b = comparison.other.color or "#4FA3FF"
+        if c_a.lower() == c_b.lower():
+            c_b = ApexAI._lighten(c_a, 70)
+        return c_a, c_b
+
+    def _tel_fig_width_in(self, dpi=100):
+        try:
+            w = self.telemetry_frame.winfo_width()
+        except tk.TclError:
+            w = 0
+        if w < 400:
+            w = 1040
+        return max(6.5, (w - 40) / dpi)
+
+    def _render_telemetry(self, comparison):
+        for w in self._tel_inner.winfo_children():
+            w.destroy()
+
+        self._render_tel_summary(self._tel_inner, comparison)
+
+        if not comparison.same_circuit:
+            warn = tk.Frame(self._tel_inner, bg="#3A2410",
+                            highlightbackground="#8A5A20",
+                            highlightthickness=1)
+            warn.pack(fill=tk.X, pady=(8, 0))
+            tk.Label(warn,
+                     text="⚠  These laps look like different circuits — the "
+                          "distance axis lines up by length only, so read "
+                          "the delta with care.",
+                     font=("Helvetica Neue", 10), fg="#F0C070", bg="#3A2410",
+                     padx=12, pady=7, justify=tk.LEFT,
+                     wraplength=900).pack(anchor="w")
+
+        for builder in (self._tel_traces_image, self._tel_dominance_image):
+            photo = builder(comparison)
+            if photo is None:
+                continue
+            lbl = tk.Label(self._tel_inner, image=photo, bg=BG, bd=0)
+            lbl.image = photo
+            lbl.pack(anchor="w", pady=(10, 0))
+            lbl.bind("<MouseWheel>", self._tel_wheel)
+
+        self._tel_canvas.yview_moveto(0)
+
+    def _render_tel_summary(self, parent, comparison):
+        """Two lap cards side by side plus the headline delta."""
+        row = tk.Frame(parent, bg=BG)
+        row.pack(fill=tk.X, pady=(8, 0))
+        c_a, c_b = self._tel_pair_colors(comparison)
+
+        for lap, color in ((comparison.ref, c_a), (comparison.other, c_b)):
+            card = tk.Frame(row, bg=BG_CARD, highlightbackground=BORDER,
+                            highlightthickness=1)
+            card.pack(side=tk.LEFT, padx=(0, 10))
+            inner = tk.Frame(card, bg=BG_CARD, padx=14, pady=10)
+            inner.pack()
+
+            head = tk.Frame(inner, bg=BG_CARD)
+            head.pack(anchor="w")
+            tk.Frame(head, bg=color, width=5, height=20).pack(
+                side=tk.LEFT, padx=(0, 8), fill=tk.Y)
+            tk.Label(head, text=lap.driver,
+                     font=("Helvetica Neue", 17, "bold"),
+                     fg=WHITE, bg=BG_CARD).pack(side=tk.LEFT)
+            tk.Label(head, text=teldata.fmt_laptime(lap.lap_time),
+                     font=(self.MONO, 15, "bold"), fg=color,
+                     bg=BG_CARD).pack(side=tk.LEFT, padx=(12, 0))
+
+            tk.Label(inner,
+                     text=f"{lap.year} {lap.event} · {lap.session_name} · "
+                          f"Lap {lap.lap_number}",
+                     font=("Helvetica Neue", 10), fg=GRAY,
+                     bg=BG_CARD).pack(anchor="w", pady=(3, 0))
+
+            stats = tk.Frame(inner, bg=BG_CARD)
+            stats.pack(anchor="w", pady=(7, 0))
+            tyre = (lap.compound or "—").title()
+            if lap.tyre_life:
+                tyre += f" · {int(lap.tyre_life)} laps"
+            for label, value, tint in (
+                ("TYRE", tyre, teldata.compound_color(lap.compound)),
+                ("TOP", f"{lap.top_speed:.0f} km/h", None),
+                ("AVG", f"{lap.avg_speed:.0f} km/h", None),
+                ("WOT", f"{lap.wot_pct:.0f}%", None),
+                ("BRAKE", f"{lap.braking_pct:.0f}%", None),
+            ):
+                cell = tk.Frame(stats, bg=BG_CARD)
+                cell.pack(side=tk.LEFT, padx=(0, 16))
+                tk.Label(cell, text=label, font=(self.MONO, 7), fg=MUTED,
+                         bg=BG_CARD).pack(anchor="w")
+                tk.Label(cell, text=value, font=(self.MONO, 10, "bold"),
+                         fg=tint or WHITE, bg=BG_CARD).pack(anchor="w")
+
+        # Headline delta card.
+        delta = comparison.final_delta
+        faster = comparison.ref if (delta or 0) > 0 else comparison.other
+        d_card = tk.Frame(row, bg=BG_CARD, highlightbackground=GOLD,
+                          highlightthickness=1)
+        d_card.pack(side=tk.LEFT)
+        d_in = tk.Frame(d_card, bg=BG_CARD, padx=16, pady=10)
+        d_in.pack()
+        tk.Label(d_in, text="LAP DELTA", font=(self.MONO, 7), fg=MUTED,
+                 bg=BG_CARD).pack(anchor="w")
+        tk.Label(d_in, text=f"{teldata.fmt_delta(delta)}s",
+                 font=(self.MONO, 20, "bold"), fg=GOLD,
+                 bg=BG_CARD).pack(anchor="w")
+        tk.Label(d_in, text=f"{faster.driver} faster",
+                 font=("Helvetica Neue", 10), fg=GRAY,
+                 bg=BG_CARD).pack(anchor="w")
+
+    def _tel_style_axis(self, ax, ylabel, last=False):
+        ax.set_facecolor(BG_CARD)
+        ax.grid(True, color=BORDER, linewidth=0.5, alpha=0.55)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(BORDER)
+        ax.tick_params(colors=GRAY, labelsize=7.5)
+        ax.set_ylabel(ylabel, color=GRAY, fontsize=8)
+        if not last:
+            ax.tick_params(labelbottom=False)
+        else:
+            ax.set_xlabel("Distance around the lap (m)", color=GRAY,
+                          fontsize=8.5)
+
+    def _tel_traces_image(self, cmp_):
+        """Speed / delta / throttle / brake+DRS / gear, on a shared axis."""
+        if not HAS_PIL:
+            return None
+        ref, oth = cmp_.ref, cmp_.other
+        c_a, c_b = self._tel_pair_colors(cmp_)
+        dpi = 100
+        w_in = self._tel_fig_width_in(dpi)
+
+        fig = plt.figure(figsize=(w_in, 6.6), facecolor=BG, dpi=dpi)
+        gs = fig.add_gridspec(5, 1, height_ratios=[3.0, 1.7, 1.3, 1.0, 1.2],
+                              hspace=0.14, left=0.065, right=0.985,
+                              top=0.965, bottom=0.075)
+        ax_speed, ax_delta, ax_thr, ax_brk, ax_gear = [
+            fig.add_subplot(gs[i]) for i in range(5)]
+
+        # -- speed --
+        ax_speed.plot(ref.distance, ref.speed, color=c_a, linewidth=1.5,
+                      label=f"{ref.driver}  {teldata.fmt_laptime(ref.lap_time)}")
+        ax_speed.plot(oth.distance, oth.speed, color=c_b, linewidth=1.5,
+                      linestyle="--",
+                      label=f"{oth.driver}  {teldata.fmt_laptime(oth.lap_time)}")
+        self._tel_style_axis(ax_speed, "Speed (km/h)")
+        leg = ax_speed.legend(loc="lower right", fontsize=8, framealpha=0.9,
+                              facecolor=BG_SURFACE, edgecolor=BORDER)
+        for text in leg.get_texts():
+            text.set_color(WHITE)
+
+        # -- delta: positive means the comparison car is losing time --
+        self._tel_style_axis(ax_delta, f"Δ to {ref.driver} (s)")
+        ax_delta.axhline(0, color=GRAY, linewidth=0.8, alpha=0.7)
+        ax_delta.plot(cmp_.distance, cmp_.delta, color=WHITE, linewidth=1.2)
+        ax_delta.fill_between(cmp_.distance, 0, cmp_.delta,
+                              where=cmp_.delta >= 0, color=c_a, alpha=0.35,
+                              interpolate=True)
+        ax_delta.fill_between(cmp_.distance, 0, cmp_.delta,
+                              where=cmp_.delta < 0, color=c_b, alpha=0.35,
+                              interpolate=True)
+
+        # -- throttle --
+        ax_thr.plot(ref.distance, ref.throttle, color=c_a, linewidth=1.1)
+        ax_thr.plot(oth.distance, oth.throttle, color=c_b, linewidth=1.1,
+                    linestyle="--")
+        ax_thr.set_ylim(-5, 105)
+        self._tel_style_axis(ax_thr, "Throttle %")
+
+        # -- brake + DRS: both are on/off, so draw them as bands rather
+        #    than lines.  DRS codes 10/12/14 mean the flap is open. --
+        self._tel_style_axis(ax_brk, "Brake · DRS")
+        ax_brk.set_ylim(0, 2)
+        ax_brk.set_yticks([0.5, 1.5])
+        ax_brk.set_yticklabels([oth.driver, ref.driver], fontsize=7.5)
+        for idx, (lap, color) in enumerate(((oth, c_b), (ref, c_a))):
+            base = idx
+            ax_brk.fill_between(lap.distance, base + 0.05, base + 0.45,
+                                where=lap.brake > 0.5, color=color,
+                                step="mid", linewidth=0)
+            ax_brk.fill_between(lap.distance, base + 0.55, base + 0.95,
+                                where=lap.drs >= 10, color=GREEN,
+                                step="mid", linewidth=0, alpha=0.85)
+        ax_brk.text(0.995, 0.5, "brake ▁  DRS ▔", transform=ax_brk.transAxes,
+                    ha="right", va="center", fontsize=7, color=MUTED)
+
+        # -- gear --
+        ax_gear.step(ref.distance, ref.gear, where="mid", color=c_a,
+                     linewidth=1.1)
+        ax_gear.step(oth.distance, oth.gear, where="mid", color=c_b,
+                     linewidth=1.1, linestyle="--")
+        ax_gear.set_ylim(0.5, 8.8)
+        ax_gear.set_yticks(range(1, 9))
+        self._tel_style_axis(ax_gear, "Gear", last=True)
+
+        return self._fig_to_photo(fig)
+
+    def _tel_dominance_image(self, cmp_):
+        """Track map coloured by who owns each mini-sector, plus the
+        per-sector time swing that produced the final delta."""
+        if not HAS_PIL:
+            return None
+        ref, oth = cmp_.ref, cmp_.other
+        c_a, c_b = self._tel_pair_colors(cmp_)
+        dpi = 100
+        w_in = self._tel_fig_width_in(dpi)
+
+        fig = plt.figure(figsize=(w_in, 3.1), facecolor=BG, dpi=dpi)
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.05, 1.6], wspace=0.14,
+                              left=0.02, right=0.985, top=0.88, bottom=0.16)
+        ax_map = fig.add_subplot(gs[0])
+        ax_bar = fig.add_subplot(gs[1])
+
+        # -- dominance map --
+        ax_map.set_facecolor(BG)
+        ax_map.set_xticks([])
+        ax_map.set_yticks([])
+        for s in ax_map.spines.values():
+            s.set_visible(False)
+        ax_map.set_title(f"Mini-sector dominance · {ref.driver} vs {oth.driver}",
+                         color=WHITE, fontsize=9, pad=6)
+
+        xs = np.interp(cmp_.distance, ref.distance, ref.x)
+        ys = np.interp(cmp_.distance, ref.distance, ref.y)
+        if np.isfinite(xs).any() and np.isfinite(ys).any():
+            edges = cmp_.minisector_edges
+            for i, winner in enumerate(cmp_.minisector_winner):
+                m = ((cmp_.distance >= edges[i])
+                     & (cmp_.distance <= edges[i + 1]))
+                if m.sum() < 2:
+                    continue
+                ax_map.plot(xs[m], ys[m],
+                            color=c_a if winner == 0 else c_b,
+                            linewidth=5, solid_capstyle="round")
+            ax_map.set_aspect("equal", adjustable="datalim")
+        else:
+            ax_map.text(0.5, 0.5, "No position data for this lap",
+                        transform=ax_map.transAxes, ha="center",
+                        va="center", color=MUTED, fontsize=9)
+
+        # -- per-sector swing --
+        ax_bar.set_facecolor(BG_CARD)
+        n = len(cmp_.minisector_delta)
+        colors = [c_a if d > 0 else c_b for d in cmp_.minisector_delta]
+        ax_bar.bar(range(1, n + 1), cmp_.minisector_delta, color=colors,
+                   width=0.78, edgecolor="none")
+        ax_bar.axhline(0, color=GRAY, linewidth=0.8, alpha=0.7)
+        ax_bar.grid(True, axis="y", color=BORDER, linewidth=0.5, alpha=0.55)
+        ax_bar.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax_bar.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax_bar.spines[side].set_color(BORDER)
+        ax_bar.tick_params(colors=GRAY, labelsize=7.5)
+        ax_bar.set_xlabel("Mini-sector", color=GRAY, fontsize=8.5)
+        ax_bar.set_ylabel("Time gained / lost (s)", color=GRAY, fontsize=8)
+        won_a = int((cmp_.minisector_winner == 0).sum())
+        ax_bar.set_title(
+            f"{ref.driver} quicker in {won_a} of {n} mini-sectors    ·    "
+            f"{oth.driver} in {n - won_a}",
+            color=WHITE, fontsize=9, pad=6)
+
+        return self._fig_to_photo(fig)
+
+    @staticmethod
+    def _fig_to_photo(fig):
+        """Render a matplotlib figure into a Tk image and free the figure."""
+        buf = io.BytesIO()
+        try:
+            fig.savefig(buf, format="png", facecolor=fig.get_facecolor(),
+                        dpi=fig.dpi)
+        finally:
+            plt.close(fig)
+        buf.seek(0)
+        return ImageTk.PhotoImage(Image.open(buf).convert("RGB"))
+
+    # ── 07 · Session replay ──
+
+    def _on_show_replay(self):
+        if self._current_view == "replay":
+            self._switch_to_view("predictions")
+            return
+        if not HAS_TELEMETRY:
+            self._set_status("FastF1 is required for session replay "
+                             "(pip install -r requirements.txt)")
+            return
+        if not self._replay_built:
+            self._build_replay_view()
+            self._replay_built = True
+        self._switch_to_view("replay")
+        if self._replay is None:
+            self._set_status("Session Replay · pick a session and hit LOAD")
+
+    def _build_replay_view(self):
+        for w in self.replay_frame.winfo_children():
+            w.destroy()
+
+        top = tk.Frame(self.replay_frame, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(top, text="SESSION REPLAY",
+                 font=("Helvetica Neue", 16, "bold"),
+                 fg=GOLD, bg=BG).pack(side=tk.LEFT)
+        tk.Label(top, text="Replay any session — live track map, timing "
+                           "screen and telemetry",
+                 font=("Helvetica Neue", 11), fg=MUTED, bg=BG
+                 ).pack(side=tk.LEFT, padx=(14, 0), pady=(3, 0))
+
+        picker_row = tk.Frame(self.replay_frame, bg=BG)
+        picker_row.pack(fill=tk.X, pady=(4, 0))
+        self._build_session_picker(picker_row, "replay").pack(side=tk.LEFT)
+        self._replay_load_btn = self._make_btn(
+            picker_row, "LOAD REPLAY", GOLD, WHITE, self._replay_load,
+            border=GOLD_GLOW)
+        self._replay_load_btn.pack(side=tk.LEFT, padx=(14, 0))
+        self._replay_status = tk.Label(
+            picker_row, text="", font=(self.MONO, 9), fg=MUTED, bg=BG)
+        self._replay_status.pack(side=tk.LEFT, padx=(14, 0))
+
+        tk.Frame(self.replay_frame, bg=F1_RED, height=2).pack(
+            fill=tk.X, pady=(8, 8))
+
+        # -- transport sits at the bottom so the stage above can expand --
+        self._build_replay_transport(self.replay_frame)
+
+        stage = tk.Frame(self.replay_frame, bg=BG)
+        stage.pack(fill=tk.BOTH, expand=True)
+
+        self.replay_canvas = tk.Canvas(stage, bg="#0E0E14",
+                                       highlightthickness=1,
+                                       highlightbackground=BORDER, bd=0)
+        self.replay_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.replay_canvas.bind("<Configure>", self._replay_canvas_resized)
+
+        side = tk.Frame(stage, bg=BG, width=330)
+        side.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+        side.pack_propagate(False)
+        self._build_replay_timing(side)
+        self._build_replay_hud(side)
+
+    def _build_replay_transport(self, parent):
+        bar = tk.Frame(parent, bg=BG_SURFACE, highlightbackground=BORDER,
+                       highlightthickness=1)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        inner = tk.Frame(bar, bg=BG_SURFACE, padx=10, pady=7)
+        inner.pack(fill=tk.X)
+
+        self._replay_play_btn = self._make_btn(
+            inner, "▶  PLAY", GOLD, WHITE, self._replay_toggle_play,
+            border=GOLD_GLOW)
+        self._replay_play_btn.pack(side=tk.LEFT)
+
+        for label, cmd in (("⏮", lambda: self._replay_seek_frame(0)),
+                           ("−1 LAP", lambda: self._replay_step_lap(-1)),
+                           ("+1 LAP", lambda: self._replay_step_lap(1)),
+                           ("⏭", self._replay_seek_end)):
+            self._make_btn(inner, label, BG_HOVER, WHITE, cmd,
+                           border=BORDER).pack(side=tk.LEFT, padx=(6, 0))
+
+        tk.Label(inner, text="SPEED", font=(self.MONO, 8), fg=MUTED,
+                 bg=BG_SURFACE).pack(side=tk.LEFT, padx=(16, 6))
+        self._replay_speed_btns = {}
+        for mult in self.REPLAY_SPEEDS:
+            label = f"{mult:g}×"
+            btn = self._make_btn(
+                inner, label, BG_HOVER, GRAY,
+                lambda m=mult: self._replay_set_speed(m), border=BORDER)
+            btn.pack(side=tk.LEFT, padx=2)
+            self._replay_speed_btns[mult] = btn
+
+        # Clock + lap counter on the right of the transport.
+        self._replay_clock = tk.Label(
+            inner, text="--:--:--", font=(self.MONO, 12, "bold"),
+            fg=WHITE, bg=BG_SURFACE)
+        self._replay_clock.pack(side=tk.RIGHT, padx=(10, 0))
+        self._replay_lap_lbl = tk.Label(
+            inner, text="LAP —", font=(self.MONO, 12, "bold"),
+            fg=GOLD, bg=BG_SURFACE)
+        self._replay_lap_lbl.pack(side=tk.RIGHT, padx=(10, 0))
+
+        scrub_row = tk.Frame(bar, bg=BG_SURFACE)
+        scrub_row.pack(fill=tk.X, padx=10, pady=(0, 7))
+        self._replay_scrub_var = tk.DoubleVar(value=0.0)
+        self._replay_scrub = ttk.Scale(
+            scrub_row, from_=0, to=1, orient="horizontal",
+            variable=self._replay_scrub_var, command=self._replay_scrubbed)
+        self._replay_scrub.pack(fill=tk.X)
+        self._replay_scrub_guard = False
+
+        self._replay_set_speed(1)
+
+    def _build_replay_timing(self, parent):
+        head = tk.Frame(parent, bg=BG)
+        head.pack(fill=tk.X)
+        tk.Label(head, text="LIVE TIMING", font=(self.MONO, 9, "bold"),
+                 fg=GOLD, bg=BG).pack(side=tk.LEFT)
+        self._replay_order_note = tk.Label(
+            head, text="", font=(self.MONO, 7), fg=MUTED, bg=BG)
+        self._replay_order_note.pack(side=tk.RIGHT)
+
+        wrap = tk.Frame(parent, bg=BG_SURFACE, highlightbackground=BORDER,
+                        highlightthickness=1)
+        wrap.pack(fill=tk.BOTH, expand=True, pady=(4, 8))
+
+        hdr = tk.Frame(wrap, bg=BG_CARD)
+        hdr.pack(fill=tk.X)
+        for text, width, anchor in (("P", 3, "w"), ("DRIVER", 6, "w"),
+                                    ("LAP", 4, "e"), ("GAP", 9, "e"),
+                                    ("BEST", 9, "e")):
+            tk.Label(hdr, text=text, font=(self.MONO, 7), fg=MUTED,
+                     bg=BG_CARD, width=width, anchor=anchor).pack(
+                side=tk.LEFT, padx=1, pady=2)
+
+        # Pre-build a fixed pool of rows and update their text each frame;
+        # destroying and re-creating twenty rows at 25 fps would thrash Tk.
+        self._replay_rows = []
+        rows_host = tk.Frame(wrap, bg=BG_SURFACE)
+        rows_host.pack(fill=tk.BOTH, expand=True)
+        for i in range(24):
+            row = tk.Frame(rows_host, bg=BG_SURFACE, cursor="hand2")
+            cells = {}
+            cells["accent"] = tk.Frame(row, bg=BG_SURFACE, width=3)
+            cells["accent"].pack(side=tk.LEFT, fill=tk.Y)
+            for name, width, anchor, font, color in (
+                ("pos", 3, "w", (self.MONO, 9, "bold"), GRAY),
+                ("abbr", 6, "w", (self.MONO, 9, "bold"), WHITE),
+                ("lap", 4, "e", (self.MONO, 8), GRAY),
+                ("gap", 9, "e", (self.MONO, 8), WHITE),
+                ("best", 9, "e", (self.MONO, 8), GRAY),
+            ):
+                lbl = tk.Label(row, text="", font=font, fg=color,
+                               bg=BG_SURFACE, width=width, anchor=anchor)
+                lbl.pack(side=tk.LEFT, padx=1)
+                cells[name] = lbl
+            cells["tyre"] = tk.Label(row, text="", font=(self.MONO, 8, "bold"),
+                                     fg=MUTED, bg=BG_SURFACE, width=2)
+            cells["tyre"].pack(side=tk.LEFT)
+            row._cells = cells
+            row._abbr = None
+            # Clicking a row moves the HUD onto that driver.
+            for w in [row] + list(row.winfo_children()):
+                w.bind("<Button-1>",
+                       lambda _e, r=row: self._replay_focus_row(r))
+            self._replay_rows.append(row)
+
+    def _build_replay_hud(self, parent):
+        tk.Label(parent, text="TELEMETRY", font=(self.MONO, 9, "bold"),
+                 fg=GOLD, bg=BG).pack(anchor="w")
+        wrap = tk.Frame(parent, bg=BG_SURFACE, highlightbackground=BORDER,
+                        highlightthickness=1)
+        wrap.pack(fill=tk.X, pady=(4, 0))
+        inner = tk.Frame(wrap, bg=BG_SURFACE, padx=10, pady=8)
+        inner.pack(fill=tk.X)
+
+        head = tk.Frame(inner, bg=BG_SURFACE)
+        head.pack(fill=tk.X)
+        self._hud_accent = tk.Frame(head, bg=GOLD, width=5, height=22)
+        self._hud_accent.pack(side=tk.LEFT, padx=(0, 8), fill=tk.Y)
+        self._hud_driver = tk.Label(head, text="—",
+                                    font=("Helvetica Neue", 15, "bold"),
+                                    fg=WHITE, bg=BG_SURFACE)
+        self._hud_driver.pack(side=tk.LEFT)
+        self._hud_team = tk.Label(head, text="", font=(self.MONO, 8),
+                                  fg=MUTED, bg=BG_SURFACE)
+        self._hud_team.pack(side=tk.LEFT, padx=(8, 0), pady=(4, 0))
+
+        speed_row = tk.Frame(inner, bg=BG_SURFACE)
+        speed_row.pack(fill=tk.X, pady=(6, 2))
+        self._hud_speed = tk.Label(speed_row, text="—",
+                                   font=(self.MONO, 26, "bold"),
+                                   fg=WHITE, bg=BG_SURFACE)
+        self._hud_speed.pack(side=tk.LEFT)
+        tk.Label(speed_row, text="km/h", font=(self.MONO, 8), fg=MUTED,
+                 bg=BG_SURFACE).pack(side=tk.LEFT, padx=(4, 0), pady=(12, 0))
+        self._hud_gear = tk.Label(speed_row, text="—",
+                                  font=(self.MONO, 22, "bold"),
+                                  fg=GOLD, bg=BG_SURFACE)
+        self._hud_gear.pack(side=tk.RIGHT)
+        tk.Label(speed_row, text="GEAR", font=(self.MONO, 7), fg=MUTED,
+                 bg=BG_SURFACE).pack(side=tk.RIGHT, padx=(0, 5), pady=(10, 0))
+
+        # Throttle / brake bars: a pit-wall pedal trace in two rows.
+        self._hud_bars = {}
+        for name, color in (("throttle", GREEN), ("brake", F1_RED)):
+            bar_row = tk.Frame(inner, bg=BG_SURFACE)
+            bar_row.pack(fill=tk.X, pady=1)
+            tk.Label(bar_row, text=name.upper()[:4], font=(self.MONO, 7),
+                     fg=MUTED, bg=BG_SURFACE, width=5,
+                     anchor="w").pack(side=tk.LEFT)
+            cv = tk.Canvas(bar_row, height=10, bg=BG_CARD,
+                           highlightthickness=0, bd=0)
+            cv.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            rect = cv.create_rectangle(0, 0, 0, 10, fill=color, outline="")
+            self._hud_bars[name] = (cv, rect)
+
+        foot = tk.Frame(inner, bg=BG_SURFACE)
+        foot.pack(fill=tk.X, pady=(6, 0))
+        self._hud_chips = {}
+        for name, label in (("rpm", "RPM"), ("drs", "DRS"),
+                            ("tyre", "TYRE"), ("lap", "LAP")):
+            cell = tk.Frame(foot, bg=BG_SURFACE)
+            cell.pack(side=tk.LEFT, padx=(0, 14))
+            tk.Label(cell, text=label, font=(self.MONO, 7), fg=MUTED,
+                     bg=BG_SURFACE).pack(anchor="w")
+            val = tk.Label(cell, text="—", font=(self.MONO, 10, "bold"),
+                           fg=WHITE, bg=BG_SURFACE)
+            val.pack(anchor="w")
+            self._hud_chips[name] = val
+
+    # ── Replay loading ──
+
+    def _replay_say(self, msg):
+        try:
+            self._replay_status.configure(text=msg)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _replay_load(self):
+        sel = self._picker_selection("replay")
+        if sel is None:
+            self._replay_say("Pick a season, round and session first")
+            return
+        year, rnd, code = sel
+        self._replay_pause()
+        self._replay = None
+        self._replay_say("Loading…")
+        self._set_busy(True)
+
+        def work():
+            try:
+                rp = teldata.get_replay(
+                    year, rnd, code, team_colors=TEAM_COLORS,
+                    progress=lambda m: self.root.after(
+                        0, lambda mm=m: self._replay_say(mm)))
+                err = None
+            except Exception as exc:
+                rp, err = None, exc
+            self.root.after(0, lambda: self._replay_ready(rp, err))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _replay_ready(self, rp, err):
+        self._set_busy(False)
+        if err or rp is None:
+            self._replay_say(f"Could not load that session: {err}")
+            self._set_status(f"Replay error: {err}")
+            return
+        self._replay = rp
+        self._replay_frame = 0.0
+        self._replay_focus = rp.drivers[0].info.abbr if rp.drivers else None
+        self._replay_say(
+            f"{rp.year} {rp.event} · {rp.session_name} · "
+            f"{len(rp.drivers)} cars · {rp.duration / 60:.0f} min")
+        self._replay_order_note.configure(
+            text="BY POSITION" if rp.race_like else "BY BEST LAP")
+        try:
+            self._replay_scrub.configure(to=max(1, rp.n_frames - 1))
+        except tk.TclError:
+            pass
+        self._replay_build_scene()
+        self._replay_render(force=True)
+        self._set_status(f"Replay loaded · {rp.event} {rp.session_name}")
+
+    # ── Replay scene ──
+
+    def _replay_transform(self, cw, ch):
+        """Fit the circuit into the canvas, preserving aspect ratio.
+
+        Canvas Y grows downwards while track coordinates grow upwards, so
+        the Y term is negated — without that every circuit renders
+        mirrored.
+        """
+        rp = self._replay
+        x0, y0, x1, y1 = rp.bounds()
+        pad = 46
+        span_x = max(1e-6, x1 - x0)
+        span_y = max(1e-6, y1 - y0)
+        scale = min((cw - 2 * pad) / span_x, (ch - 2 * pad) / span_y)
+        off_x = (cw - span_x * scale) / 2 - x0 * scale
+        off_y = (ch + span_y * scale) / 2 + y0 * scale
+        return scale, off_x, off_y
+
+    def _replay_pt(self, x, y):
+        scale, off_x, off_y = self._replay_tf
+        return x * scale + off_x, off_y - y * scale
+
+    def _replay_canvas_resized(self, _event=None):
+        # Debounce, same as the visualization tab: dragging the window
+        # fires Configure dozens of times a second and rebuilding the
+        # circuit each time is far too expensive.
+        if self._replay is None:
+            return
+        cw = self.replay_canvas.winfo_width()
+        ch = self.replay_canvas.winfo_height()
+        if cw < 200 or ch < 200 or (cw, ch) == self._replay_last_size:
+            return
+        if self._replay_resize_job is not None:
+            try:
+                self.root.after_cancel(self._replay_resize_job)
+            except (ValueError, tk.TclError):
+                pass
+        self._replay_resize_job = self.root.after(120, self._do_replay_resize)
+
+    def _do_replay_resize(self):
+        self._replay_resize_job = None
+        if self._replay is None:
+            return
+        cw = self.replay_canvas.winfo_width()
+        ch = self.replay_canvas.winfo_height()
+        if cw < 200 or ch < 200:
+            return
+        self._replay_last_size = (cw, ch)
+        self._replay_build_scene()
+        self._replay_render(force=True)
+
+    def _replay_build_scene(self):
+        """Draw the static circuit and create one marker per car."""
+        rp = self._replay
+        canvas = self.replay_canvas
+        canvas.delete("all")
+        self._replay_car_items = {}
+        if rp is None:
+            return
+
+        cw = max(canvas.winfo_width(), 200)
+        ch = max(canvas.winfo_height(), 200)
+        self._replay_tf = self._replay_transform(cw, ch)
+
+        pts = []
+        for x, y in zip(rp.track_x, rp.track_y):
+            px, py = self._replay_pt(float(x), float(y))
+            pts.extend((px, py))
+        if len(pts) >= 6:
+            # Close the loop, then lay a light racing surface over a wider
+            # dark kerb so the track reads as a ribbon, not a wire.
+            pts.extend(pts[:2])
+            canvas.create_line(*pts, fill="#33333D", width=13,
+                               capstyle="round", joinstyle="round",
+                               smooth=True)
+            canvas.create_line(*pts, fill="#1F1F27", width=9,
+                               capstyle="round", joinstyle="round",
+                               smooth=True)
+            # Start / finish line.
+            sx, sy = self._replay_pt(float(rp.track_x[0]), float(rp.track_y[0]))
+            canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5,
+                               fill=WHITE, outline="")
+
+        for x, y, label in rp.corners:
+            px, py = self._replay_pt(x, y)
+            canvas.create_text(px, py, text=label, fill=MUTED,
+                               font=(self.MONO, 7))
+
+        canvas.create_text(
+            14, 14, anchor="nw",
+            text=f"{rp.year}  {rp.event.upper()}",
+            fill=WHITE, font=("Helvetica Neue", 13, "bold"))
+        canvas.create_text(
+            14, 33, anchor="nw", text=rp.session_name.upper(),
+            fill=GOLD, font=(self.MONO, 9, "bold"))
+
+        for d in rp.drivers:
+            color = d.info.color or GRAY
+            dot = canvas.create_oval(0, 0, 0, 0, fill=color,
+                                     outline=BG, width=1)
+            txt = canvas.create_text(0, 0, text=d.info.abbr, fill=WHITE,
+                                     font=(self.MONO, 7, "bold"))
+            self._replay_car_items[d.info.abbr] = (dot, txt)
+
+    # ── Replay transport ──
+
+    def _replay_toggle_play(self):
+        if self._replay is None:
+            self._replay_say("Load a session first")
+            return
+        if self._replay_playing:
+            self._replay_pause()
+        else:
+            self._replay_play()
+
+    def _replay_play(self):
+        if self._replay is None or self._replay_playing:
+            return
+        # Restarting from the end would sit on a frozen final frame.
+        if self._replay_frame >= self._replay.n_frames - 1:
+            self._replay_frame = 0.0
+        self._replay_playing = True
+        self._replay_play_btn._label.configure(text="⏸  PAUSE")
+        self._replay_last_wall = time.perf_counter()
+        self._replay_tick()
+
+    def _replay_pause(self):
+        self._replay_playing = False
+        if self._replay_after is not None:
+            try:
+                self.root.after_cancel(self._replay_after)
+            except (ValueError, tk.TclError):
+                pass
+            self._replay_after = None
+        btn = getattr(self, "_replay_play_btn", None)
+        if btn is not None:
+            try:
+                btn._label.configure(text="▶  PLAY")
+            except tk.TclError:
+                pass
+
+    def _replay_set_speed(self, mult):
+        self._replay_speed = float(mult)
+        for m, btn in getattr(self, "_replay_speed_btns", {}).items():
+            active = (m == mult)
+            btn.configure(bg=GOLD if active else BG_HOVER)
+            btn._label.configure(bg=GOLD if active else BG_HOVER,
+                                 fg=WHITE if active else GRAY)
+            btn._default_bg = GOLD if active else BG_HOVER
+            btn._current_bg = btn._default_bg
+            btn._default_fg = WHITE if active else GRAY
+
+    def _replay_seek_frame(self, frame):
+        if self._replay is None:
+            return
+        self._replay_frame = float(
+            np.clip(frame, 0, self._replay.n_frames - 1))
+        self._replay_render(force=True)
+
+    def _replay_seek_end(self):
+        if self._replay is not None:
+            self._replay_seek_frame(self._replay.n_frames - 1)
+
+    def _replay_step_lap(self, direction):
+        """Jump to the frame where the race leader crosses the line."""
+        rp = self._replay
+        if rp is None or not rp.drivers:
+            return
+        frame = int(self._replay_frame)
+        order = rp.order_at(frame)
+        leader = next((d for d in rp.drivers
+                       if d.info.abbr == order[0]["abbr"]), rp.drivers[0])
+        target = int(leader.lap_number[frame]) + direction
+        target = max(1, target)
+        idx = np.searchsorted(leader.lap_number, target,
+                              side="left" if direction > 0 else "left")
+        self._replay_seek_frame(int(np.clip(idx, 0, rp.n_frames - 1)))
+
+    def _replay_scrubbed(self, value):
+        # ttk.Scale fires this on programmatic writes too; the guard stops
+        # a render-driven update from bouncing back as a fresh seek.
+        if self._replay is None or self._replay_scrub_guard:
+            return
+        try:
+            frame = float(value)
+        except (TypeError, ValueError):
+            return
+        self._replay_frame = float(
+            np.clip(frame, 0, self._replay.n_frames - 1))
+        self._replay_render(force=True)
+
+    def _replay_focus_row(self, row):
+        if getattr(row, "_abbr", None):
+            self._replay_focus = row._abbr
+            self._replay_render(force=True)
+
+    # ── Replay playback loop ──
+
+    def _replay_tick(self):
+        if not self._replay_playing or self._current_view != "replay":
+            return
+        rp = self._replay
+        if rp is None:
+            return
+
+        now = time.perf_counter()
+        dt = now - self._replay_last_wall
+        self._replay_last_wall = now
+        # A dragged or occluded window can hand us a huge dt; clamp it so
+        # the cars don't teleport half a race on resume.
+        dt = min(max(dt, 0.0), 0.25)
+
+        self._replay_frame += dt * rp.hz * self._replay_speed
+        if self._replay_frame >= rp.n_frames - 1:
+            self._replay_frame = float(rp.n_frames - 1)
+            self._replay_render(force=True)
+            self._replay_pause()
+            self._set_status("Replay finished")
+            return
+
+        self._replay_render()
+        self._replay_after = self.root.after(40, self._replay_tick)
+
+    def _replay_render(self, force=False):
+        """Paint one frame: cars, timing screen, HUD, transport readouts.
+
+        Car positions move every frame; the timing screen and HUD refresh
+        at ~5 Hz.  Re-configuring 24 rows of labels 25 times a second is
+        pure overhead — the numbers can't be read that fast anyway.
+        """
+        rp = self._replay
+        if rp is None:
+            return
+        frame = int(np.clip(self._replay_frame, 0, rp.n_frames - 1))
+        canvas = self.replay_canvas
+
+        for d in rp.drivers:
+            items = self._replay_car_items.get(d.info.abbr)
+            if items is None:
+                continue
+            dot, txt = items
+            x, y = float(d.x[frame]), float(d.y[frame])
+            if not (math.isfinite(x) and math.isfinite(y)):
+                canvas.itemconfigure(dot, state="hidden")
+                canvas.itemconfigure(txt, state="hidden")
+                continue
+            px, py = self._replay_pt(x, y)
+            focused = (d.info.abbr == self._replay_focus)
+            r = 8 if focused else 5.5
+            canvas.coords(dot, px - r, py - r, px + r, py + r)
+            canvas.coords(txt, px, py - r - 7)
+            live = bool(d.on_track[frame])
+            canvas.itemconfigure(dot, state="normal",
+                                 width=2 if focused else 1,
+                                 outline=WHITE if focused else BG)
+            canvas.itemconfigure(
+                txt, state="normal" if (focused or live) else "hidden",
+                fill=WHITE if focused else GRAY)
+
+        now = time.perf_counter()
+        if not force and (now - getattr(self, "_replay_last_panel", 0.0)) < 0.2:
+            return
+        self._replay_last_panel = now
+
+        self._replay_render_timing(rp, frame)
+        self._replay_render_hud(rp, frame)
+
+        elapsed = float(rp.t[frame] - rp.t[0])
+        self._replay_clock.configure(
+            text=f"{int(elapsed // 3600):02d}:"
+                 f"{int(elapsed // 60) % 60:02d}:{int(elapsed % 60):02d}")
+        lead_lap = max((int(d.lap_number[frame]) for d in rp.drivers),
+                       default=0)
+        total = f" / {rp.total_laps}" if rp.total_laps else ""
+        self._replay_lap_lbl.configure(
+            text=f"LAP {lead_lap}{total}" if rp.race_like else "PRACTICE")
+
+        self._replay_scrub_guard = True
+        try:
+            self._replay_scrub_var.set(frame)
+        finally:
+            self._replay_scrub_guard = False
+
+    def _replay_render_timing(self, rp, frame):
+        order = rp.order_at(frame)
+        for i, row in enumerate(self._replay_rows):
+            if i >= len(order):
+                row.pack_forget()
+                row._abbr = None
+                continue
+            entry = order[i]
+            row._abbr = entry["abbr"]
+            if not row.winfo_ismapped():
+                row.pack(fill=tk.X, pady=1)
+
+            focused = entry["abbr"] == self._replay_focus
+            bg = BG_HOVER if focused else BG_SURFACE
+            cells = row._cells
+            row.configure(bg=bg)
+            cells["accent"].configure(bg=entry["color"] or GRAY)
+            cells["pos"].configure(text=f"{entry['pos']:>2}", bg=bg)
+            cells["abbr"].configure(
+                text=entry["abbr"], bg=bg,
+                fg=MUTED if entry["retired"] else WHITE)
+            cells["lap"].configure(text=str(entry["lap"]), bg=bg)
+            cells["gap"].configure(
+                text="OUT" if entry["retired"]
+                else teldata.fmt_gap(entry["gap"], entry["laps_down"]),
+                bg=bg, fg=GOLD if entry["pos"] == 1 else WHITE)
+            cells["best"].configure(
+                text=teldata.fmt_laptime(entry["best"]), bg=bg)
+            compound = (entry["compound"] or "")[:1].upper()
+            cells["tyre"].configure(
+                text=compound, bg=bg,
+                fg=teldata.compound_color(entry["compound"]))
+
+    def _replay_render_hud(self, rp, frame):
+        if self._replay_focus is None:
+            return
+        hud = rp.telemetry_at(self._replay_focus, frame)
+        if hud is None:
+            return
+        color = hud["color"] or GOLD
+        self._hud_accent.configure(bg=color)
+        self._hud_driver.configure(text=self._replay_focus)
+        self._hud_team.configure(text=(hud["team"] or "").upper())
+
+        speed = hud["speed"]
+        self._hud_speed.configure(text=f"{speed:.0f}" if speed else "—")
+        gear = hud["gear"]
+        self._hud_gear.configure(text=f"{int(gear)}" if gear else "—")
+
+        for name, value in (("throttle", hud["throttle"]),
+                            ("brake", (hud["brake"] or 0) * 100.0)):
+            cv, rect = self._hud_bars[name]
+            width = max(cv.winfo_width(), 1)
+            pct = 0.0 if value is None else max(0.0, min(100.0, value))
+            cv.coords(rect, 0, 0, width * pct / 100.0, 10)
+
+        rpm = hud["rpm"]
+        self._hud_chips["rpm"].configure(text=f"{rpm:,.0f}" if rpm else "—")
+        # DRS status codes: 10, 12 and 14 mean the flap is actually open;
+        # 8 only means the driver is within a second and eligible.
+        drs = hud["drs"] or 0
+        self._hud_chips["drs"].configure(
+            text="OPEN" if drs >= 10 else "—",
+            fg=GREEN if drs >= 10 else MUTED)
+        compound = hud["compound"]
+        self._hud_chips["tyre"].configure(
+            text=(compound or "—").title(),
+            fg=teldata.compound_color(compound))
+        self._hud_chips["lap"].configure(text=str(hud["lap"]))
 
     # ── Track visualization ──
 

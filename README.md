@@ -1,13 +1,15 @@
 # ApexAI — F1 Race Predictor
 
-ApexAI is an end-to-end Formula 1 race prediction suite. It ingests
-timing data with [FastF1](https://github.com/theOehrly/Fast-F1), trains
-a three-model soft-voting ensemble on five seasons of race history
-(2022 – 2026 mid-season), and presents calibrated win probabilities for
-the next race inside a custom Tk + PIL desktop app styled like a
-pit-wall racing console — complete with a broadcast-style podium,
-per-circuit ambient theming, live FIA team-radio playback, and
-one-click race replays for every session of every round.
+ApexAI is an end-to-end Formula 1 race prediction *and telemetry* suite.
+It ingests timing data with
+[FastF1](https://github.com/theOehrly/Fast-F1), trains a three-model
+soft-voting ensemble on five seasons of race history (2022 – 2026
+mid-season), and presents calibrated win probabilities for the next race
+inside a custom Tk + PIL desktop app styled like a pit-wall racing
+console — complete with a broadcast-style podium, per-circuit ambient
+theming, live FIA team-radio playback, one-click race replays for every
+session of every round, a lap-vs-lap telemetry overlay, and a fully
+scrubbable data-driven replay of any session since 2018.
 
 ![ApexAI racing-console GUI — v6 ensemble predictions](screenshot.png)
 
@@ -59,9 +61,10 @@ one-click race replays for every session of every round.
   latest completed weekend.
 - **Racing-console GUI** (`app.py`) — Tk + PIL interface styled like a
   steering-wheel / pit-wall console: a telemetry header cluster with a
-  pulsing SYS LED, live session clock, and model/accuracy readouts; five
+  pulsing SYS LED, live session clock, and model/accuracy readouts; seven
   numbered console-button tabs (*01 Predict*, *02 Backtest*,
-  *03 Visualization*, *04 Team Radio*, *05 Replays*) with red engaged
+  *03 Visualization*, *04 Team Radio*, *05 Replays*, *06 Telemetry*,
+  *07 Session Replay*) with red engaged
   light-bars; monospace telemetry fonts throughout; a carbon-fiber cap
   strip; and a timing-bar footer — plus a one-click *Refresh* to
   retrain on the latest data.
@@ -94,6 +97,30 @@ one-click race replays for every session of every round.
   [fullraces.com](https://fullraces.com). Pick a season, click *Race* /
   *Qualifying* / *Sprint* / *Sprint Quali* / *Practice* and the
   replay opens in your default browser.
+- **Telemetry overlay** (`telemetry.py` + *06 Telemetry*) — put any two
+  laps side by side on a shared distance axis: speed, throttle, brake,
+  DRS and gear traces, a running time delta, and a mini-sector
+  dominance map showing exactly where each lap was won. Alignment is by
+  *distance around the lap* rather than by clock, so the two laps do not
+  have to come from the same session — **lap vs lap**, **compound vs
+  compound** and **year vs year** are all the same feature. Turn off
+  *LINK SESSIONS* to reach across weekends and seasons.
+- **Session replay** (*07 Session Replay*) — a real, data-driven replay
+  of any session from 2018 onwards, rebuilt from FastF1's position and
+  car-telemetry streams:
+  - **Live track map** traced from the session's own position data, with
+    numbered corners and every car moving in real time.
+  - **Timing screen** with running order, gap to the leader, current lap,
+    tyre compound and rolling personal best. Races are ordered by track
+    position (each car projected onto the circuit centreline for a true
+    live order); qualifying and practice are ordered by best lap, exactly
+    like the real broadcast screens.
+  - **Telemetry HUD** for the focused car — speed, gear, throttle/brake
+    bars, RPM, DRS and tyre. Click any timing row to follow that driver.
+  - **Transport controls** — play/pause, 0.5× → 16× playback, scrub bar,
+    and ±1 lap jumps.
+  - Built replays are cached to `replay_cache/`, so re-opening a session
+    you have already watched is instant.
 
 ## Setup
 
@@ -130,6 +157,13 @@ the podium card + win probabilities for the next round. From there:
   driver, lap-mapped from the FIA archive.
 - **Race Replays** — One-click links to FullRaces.com for every
   session of every round, by season.
+- **Telemetry** — Pick a season, round and session, then a driver and
+  lap on each side, and hit *Compare Laps*. Leave *LINK SESSIONS* on to
+  compare two drivers in the same session; turn it off to compare across
+  sessions or seasons.
+- **Session Replay** — Pick a session and hit *Load Replay*. The first
+  load for a session downloads its telemetry stream (a minute or so on a
+  race); after that it comes straight from `replay_cache/`.
 - **F1 / ApexAI logo (header)** — Click anywhere on the brand mark to
   jump back to the predictions view.
 
@@ -158,9 +192,12 @@ at small sizes (grid rows, podium) for legibility.
 ## Project layout
 
 ```
-app.py            Tk + PIL desktop app (GUI, viz, radio, replays)
+app.py            Tk + PIL desktop app (GUI, viz, radio, replays,
+                  telemetry overlay, session replay)
 prediction.py     Data ingest, feature engineering, model training,
                   caching, singleton enforcement, and inference
+telemetry.py      Telemetry + session-replay data layer: lap traces,
+                  distance alignment / delta, and replay frame building
 predict_winner.py Headless CLI entry point
 radio_fia.py      FIA livetiming archive client for full-race radio
 team_colors.py    Official team-colour palette
@@ -184,6 +221,10 @@ Produces `dist/F1 Winner Predictor.app`. Data and cache live in
 
 - **Race + timing data** — `fastf1`, talking to the official F1 live
   timing API.
+- **Telemetry + session replay** — the same FastF1 feed's car-data and
+  position streams (`Speed`, `Throttle`, `Brake`, `nGear`, `RPM`, `DRS`,
+  `X`/`Y`). These only exist from 2018 onwards, which is why the
+  telemetry and replay season selectors stop there.
 - **Team radio** — FIA livetiming archive (`TeamRadio.json` +
   `TeamRadio.jsonStream`) with OpenF1 as a fallback.
 - **Race replays** — [fullraces.com](https://fullraces.com), reached
