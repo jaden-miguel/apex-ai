@@ -70,7 +70,8 @@ need to follow the race.
 ┌─────────────────── app.py (Tk + PIL) ──────────────────┐
 │  Header (F1 wordmark — clickable home button)          │
 │  Tab bar:  Predict · Backtest · Visualization ·         │
-│            Team Radio · Race Replays · Refresh         │
+│            Team Radio · Race Replays · Telemetry ·      │
+│            Session Replay · Refresh                     │
 │                                                        │
 │  ┌──── Predictions panel ───┐ ┌──── Insight panel ───┐ │
 │  │  Podium card + grid      │ │ Model stats          │ │
@@ -90,6 +91,15 @@ need to follow the race.
             │  run_predictions_all_…() │
             │  schedule cache          │
             │  singleton enforcement   │
+            └──────────────────────────┘
+                              │
+            ┌──── telemetry.py ────────┐
+            │  load_session()          │
+            │  lap_telemetry()         │
+            │  compare_laps() + delta  │
+            │  build_replay()          │
+            │  Replay.order_at()       │
+            │  replay disk cache       │
             └──────────────────────────┘
                               │
                               ▼
@@ -189,21 +199,87 @@ need to follow the race.
 - **F5.5.** Schedule loads on a background thread so the UI never
   freezes while the schedule cache is populating.
 
-### 6.6 Header / Home
+### 6.6 Telemetry Overlay (NEW)
 
-- **F6.1.** F1 logo and "Apex" / "AI" wordmark act as a **home button**
+- **F6.1.** Two independent lap selectors (**Car A** / **Car B**), each
+  a season → round → session → driver → lap chain. Lap defaults to the
+  driver's fastest.
+- **F6.2.** *LINK SESSIONS* (on by default) pins Car B to Car A's
+  session for the common two-team-mates case, and locks B's session
+  combos. Unlinking enables **cross-session and cross-season**
+  comparison — the year-vs-year use case.
+- **F6.3.** Laps are aligned on **distance around the lap**, not on
+  wall-clock, which is what makes lap-vs-lap, compound-vs-compound and
+  year-vs-year the same code path.
+- **F6.4.** Rendered output:
+  - Summary cards per lap: lap time, event/session/lap, tyre compound
+    + age, top speed, average speed, wide-open-throttle %, braking %.
+  - Headline **lap delta** with the faster driver named.
+  - Trace stack against distance: **speed**, **running delta**
+    (filled toward whoever is ahead), **throttle**, **brake + DRS**
+    bands, and **gear**.
+  - **Mini-sector dominance**: the lap's track map coloured by which
+    driver owns each of 25 mini-sectors, beside a bar chart of the
+    per-sector time swing that sums to the final delta.
+- **F6.5.** Team-mates share a livery colour; when the two selected
+  drivers resolve to the same colour, Car B is shifted to a light tint
+  so the traces stay distinguishable.
+- **F6.6.** Comparing laps from different circuits is permitted but
+  flagged with an inline warning, since the distance axis then only
+  lines up by length.
+- **F6.7.** All loading happens on worker threads with progress
+  reported inline; stale results are discarded if the selection moves
+  on while a fetch is in flight.
+
+### 6.7 Session Replay (NEW)
+
+- **F7.1.** Season → round → session picker, restricted to **2018 and
+  later** because FastF1 carries no car/position telemetry before then.
+- **F7.2.** Every driver's position and car-telemetry streams are
+  resampled onto one common 4 Hz time grid, so any frame can be
+  rendered directly without re-reading the source streams.
+- **F7.3.** **Track map** traced from the session's own position data
+  (the fastest lap is used as the cleanest single loop), with numbered
+  corners, a start/finish marker, and one live marker per car.
+- **F7.4.** **Timing screen**: position, driver, current lap, gap,
+  tyre compound and rolling personal best.
+  - Race-like sessions are ordered by **track progress** — each car is
+    projected onto the circuit centreline to give a continuous
+    "laps completed + fraction of the current lap" value, and the gap
+    is the time since the leader was at that same point.
+  - Qualifying and practice are ordered by **best lap set so far**,
+    matching the real broadcast screens.
+- **F7.5.** **Telemetry HUD** for the focused car: speed, gear,
+  throttle/brake bars, RPM, DRS state and tyre. Clicking any timing row
+  moves the focus.
+- **F7.6.** **Transport**: play/pause, 0.5× → 16× playback, a scrub bar,
+  ±1 lap jumps, jump to start/end, plus a session clock and lap counter.
+  Playback auto-pauses at the end and restarts from the top if played
+  again.
+- **F7.7.** Leaving the tab pauses playback rather than tearing the
+  replay down, so returning resumes in place.
+- **F7.8.** Built replays are pickled to `replay_cache/` under a
+  version-stamped key; a corrupt or stale cache silently rebuilds.
+- **F7.9.** Car markers update every frame (~25 fps); the timing screen
+  and HUD refresh at ~5 Hz, since re-configuring two dozen label rows at
+  full frame rate is pure overhead.
+
+### 6.8 Header / Home
+
+- **F8.1.** F1 logo and "Apex" / "AI" wordmark act as a **home button**
   — clicking returns to the predictions view of the last predicted
-  race, stops any running radio playback, and resets the view state.
-- **F6.2.** Hover affordance: brand mark dims/brightens to telegraph
+  race, stops any running radio playback and replay playback, and
+  resets the view state.
+- **F8.2.** Hover affordance: brand mark dims/brightens to telegraph
   that it's interactive.
 
-### 6.7 Singleton
+### 6.9 Singleton
 
-- **F7.1.** Launching `app.py` while another instance is already
+- **F9.1.** Launching `app.py` while another instance is already
   running kills the prior PID via `SIGTERM` (escalates to `SIGKILL`
   after a 2 s grace period) and claims an exclusive lockfile
   (`.apex_ai.lock`).
-- **F7.2.** Sweep the OS process list for any *other* python process
+- **F9.2.** Sweep the OS process list for any *other* python process
   whose command line points at `app.py`, not just the lockfile PID,
   so stale instances from terminals or IDE runs are also reaped.
 
@@ -217,7 +293,11 @@ need to follow the race.
 | **Backtest 96 races** | ≤ 60 s (currently ~28 s) |
 | **Visualization frame rate** | 30 fps sustained on M-series Macs |
 | **Replays tab open** | ≤ 200 ms perceived latency |
-| **Memory** | ≤ 800 MB resident |
+| **Telemetry comparison (session cached)** | ≤ 3 s from *Compare Laps* to rendered traces |
+| **Session replay build (first time)** | ≤ 90 s for a race, dominated by the telemetry download |
+| **Session replay open (cached)** | ≤ 2 s from `replay_cache/` |
+| **Replay playback frame rate** | 25 fps for car markers, 5 Hz for timing screen + HUD |
+| **Memory** | ≤ 800 MB resident; a built race replay adds ≈ 30 MB |
 | **Offline tolerance** | App must load from caches if FastF1 backends are down — schedule disk cache + stale-OK fallback |
 | **Accessibility** | Hand cursors on every clickable element, ≥ 11 pt fonts, WCAG-AA contrast on text |
 | **Singleton** | Exactly one bot instance can run at any time |
@@ -260,6 +340,9 @@ need to follow the race.
 | Parallelism | `joblib.Parallel` (threading backend) | GBM releases the GIL during numpy ops; threading avoids the pickle hit of process workers. |
 | Data | FastF1 + FIA livetiming + OpenF1 + fullraces.com | All free; FastF1 cache lives in `cache/`. |
 | Audio | `playsound3` (via `f1radio[playback]`) | Native APIs, no `afplay`/`ffplay` PATH dependency. |
+| Telemetry charts | Matplotlib rendered to PIL, shown as a Tk image | Multi-panel trace stacks and the dominance map are static once drawn; rasterising once beats re-drawing on a Tk canvas. |
+| Replay playback | Plain Tk canvas item updates on `after()` | Only the car markers move per frame, so moving ~20 canvas ovals is far cheaper than re-rendering a figure. |
+| Replay cache | `pickle` of flat numpy arrays in `replay_cache/` | A built replay is just arrays on a common time grid; version-stamped so a schema change invalidates rather than mis-loads. |
 | Packaging | PyInstaller (`build_mac.sh`) | Produces a standalone `.app` bundle. |
 
 ## 11. Risks & Mitigations
