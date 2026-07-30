@@ -1179,6 +1179,7 @@ class ApexAI:
         self.root.geometry("1120x880")
         self.result = None
         self._logos = {}
+        self._icon_cache = {}     # (name, colour, size) -> PhotoImage
         self._tk_images = []
         self._current_view = "predictions"
         self._schedule = []
@@ -1390,33 +1391,43 @@ class ApexAI:
         ctrl = tk.Frame(self.root, bg=BG, padx=36, pady=10)
         ctrl.pack(fill=tk.X)
 
+        # Each mode leads with its own glyph: chequered flag for the pick,
+        # bars for the backtest, a circuit for the map, broadcast waves for
+        # radio, a replay loop for the replays hub, a speedo for telemetry.
         self.btn_predict = self._make_tab(ctrl, "PREDICT",
-                                           self._on_predict, num="01")
+                                           self._on_predict, num="01",
+                                           icon="flag")
         self.btn_predict.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_all = self._make_tab(ctrl, "BACKTEST",
-                                       self._on_all_races, num="02")
+                                       self._on_all_races, num="02",
+                                       icon="bars")
         self.btn_all.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_viz = self._make_tab(ctrl, "VISUALIZATION",
-                                       self._on_show_viz, num="03")
+                                       self._on_show_viz, num="03",
+                                       icon="track")
         self.btn_viz.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_radio = self._make_tab(ctrl, "TEAM RADIO",
-                                         self._on_show_radio, num="04")
+                                         self._on_show_radio, num="04",
+                                         icon="radio")
         self.btn_radio.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_replays = self._make_tab(ctrl, "REPLAYS",
-                                           self._on_show_replays, num="05")
+                                           self._on_show_replays, num="05",
+                                           icon="replay")
         self.btn_replays.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_telemetry = self._make_tab(ctrl, "TELEMETRY",
-                                             self._on_show_telemetry, num="06")
+                                             self._on_show_telemetry, num="06",
+                                             icon="gauge")
         self.btn_telemetry.pack(side=tk.LEFT, padx=(0, 6))
 
-        # Trailing refresh button is visually quieter (icon-style ↻).
-        self.btn_refresh = self._make_tab(ctrl, "↻ REFRESH",
-                                           self._on_refresh, secondary=True)
+        # Trailing refresh button is visually quieter.
+        self.btn_refresh = self._make_tab(ctrl, "REFRESH",
+                                           self._on_refresh, secondary=True,
+                                           icon="refresh")
         self.btn_refresh.pack(side=tk.LEFT, padx=(8, 0))
 
         self._all_btns = [self.btn_predict, self.btn_all, self.btn_viz,
@@ -1665,6 +1676,135 @@ class ApexAI:
         if fi:
             self._stat_features.configure(text=str(len(fi)))
 
+    # ── Console tab icons ──
+    # Every tab carries a small glyph of its own.  They are drawn here
+    # rather than shipped as PNGs for two reasons: they can be re-tinted
+    # for the idle / engaged states without a second asset, and they stay
+    # crisp at any size because each one is painted at 4x and downsampled
+    # with LANCZOS.  Painters take (draw, edge, colour) and work in
+    # fractions of `edge`, so the same code renders a 15 px tab glyph and a
+    # 48 px placeholder mark.
+    _ICON_SS = 4
+    # Tab glyphs sit a little larger than the 8 pt index key they replace:
+    # a number reads at any size, a silhouette needs the extra couple of
+    # pixels to stay legible.
+    _TAB_ICON_PX = 17
+    # Idle glyphs use GRAY rather than the MUTED of the old index key —
+    # MUTED is a caption colour and at 17 px a shape in it disappears.
+    _TAB_ICON_IDLE = GRAY
+
+    def _tab_icon(self, name, color, size=_TAB_ICON_PX):
+        """Tk image for icon `name` tinted `color`, memoised per size."""
+        if not HAS_PIL:
+            return None
+        key = (name, color, size)
+        if key in self._icon_cache:
+            return self._icon_cache[key]
+        painter = getattr(self, f"_icon_{name}", None)
+        if painter is None:
+            return None
+        edge = size * self._ICON_SS
+        img = Image.new("RGBA", (edge, edge), (0, 0, 0, 0))
+        painter(ImageDraw.Draw(img), edge, color)
+        photo = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+        self._icon_cache[key] = photo
+        return photo
+
+    @staticmethod
+    def _icon_flag(d, s, c):
+        """Chequered flag — Predict."""
+        lw = max(1, int(s * 0.07))
+        d.line([(s * 0.17, s * 0.08), (s * 0.17, s * 0.93)], fill=c, width=lw)
+        x0, y0, cell = s * 0.27, s * 0.17, s * 0.19
+        for r in range(3):
+            for col in range(3):
+                if (r + col) % 2 == 0:
+                    d.rectangle([x0 + col * cell, y0 + r * cell,
+                                 x0 + (col + 1) * cell, y0 + (r + 1) * cell],
+                                fill=c)
+        d.rectangle([x0, y0, x0 + 3 * cell, y0 + 3 * cell],
+                    outline=c, width=max(1, int(s * 0.035)))
+
+    @staticmethod
+    def _icon_bars(d, s, c):
+        """Bar chart — Backtest."""
+        base = s * 0.87
+        d.line([(s * 0.11, base), (s * 0.91, base)], fill=c,
+               width=max(1, int(s * 0.06)))
+        w = s * 0.14
+        for i, h in enumerate((0.30, 0.53, 0.40, 0.70)):
+            x = s * 0.16 + i * (w + s * 0.06)
+            d.rectangle([x, base - s * h, x + w, base - s * 0.03], fill=c)
+
+    @staticmethod
+    def _icon_track(d, s, c):
+        """Circuit silhouette — Visualization.
+
+        A closed kidney loop rather than a plain ellipse: an oval reads as
+        a generic ring at tab size, whereas the hairpin on the bottom edge
+        makes it legible as a race track.
+        """
+        lw = max(1, int(s * 0.10))
+        pts = [(0.20, 0.32), (0.44, 0.17), (0.73, 0.20), (0.87, 0.35),
+               (0.79, 0.52), (0.55, 0.57), (0.45, 0.68), (0.58, 0.81),
+               (0.40, 0.86), (0.19, 0.77), (0.13, 0.55)]
+        loop = [(s * x, s * y) for x, y in pts] + [(s * pts[0][0],
+                                                    s * pts[0][1])]
+        d.line(loop, fill=c, width=lw, joint="curve")
+
+    @staticmethod
+    def _icon_radio(d, s, c):
+        """Microphone — Team Radio.
+
+        Concentric broadcast waves were the first shape here, but four thin
+        arcs collapse into dashes once the glyph is down at tab size.  A
+        mic silhouette keeps a readable outline at 17 px and says "radio"
+        just as directly.
+        """
+        lw = max(1, int(s * 0.085))
+        d.rounded_rectangle([s * 0.37, s * 0.09, s * 0.63, s * 0.56],
+                            radius=s * 0.13, fill=c)
+        d.arc([s * 0.23, s * 0.30, s * 0.77, s * 0.81],
+              start=0, end=180, fill=c, width=lw)
+        d.line([(s * 0.50, s * 0.68), (s * 0.50, s * 0.88)], fill=c, width=lw)
+        d.line([(s * 0.34, s * 0.90), (s * 0.66, s * 0.90)], fill=c, width=lw)
+
+    @classmethod
+    def _icon_replay(cls, d, s, c):
+        """Circular arrow wrapped round a play triangle — Replays."""
+        cls._circular_arrow(d, s, c)
+        d.polygon([(s * 0.43, s * 0.36), (s * 0.43, s * 0.64),
+                   (s * 0.66, s * 0.50)], fill=c)
+
+    @classmethod
+    def _icon_refresh(cls, d, s, c):
+        """The same circular arrow, without the play mark — Refresh."""
+        cls._circular_arrow(d, s, c)
+
+    @staticmethod
+    def _circular_arrow(d, s, c):
+        """Anticlockwise loop open at the top, arrowhead on the left end.
+
+        PIL measures arc angles clockwise from 3 o'clock on a y-down
+        canvas, so 305° → 235° leaves the gap straddling 270° (the top).
+        """
+        lw = max(1, int(s * 0.10))
+        d.arc([s * 0.14, s * 0.14, s * 0.86, s * 0.86],
+              start=305, end=235, fill=c, width=lw)
+        d.polygon([(s * 0.32, s * 0.05), (s * 0.32, s * 0.33),
+                   (s * 0.09, s * 0.19)], fill=c)
+
+    @staticmethod
+    def _icon_gauge(d, s, c):
+        """Speedometer sweep with a needle — Telemetry."""
+        lw = max(1, int(s * 0.10))
+        # Full dial kept inside the canvas — an arc box running past the
+        # bottom edge gets clipped and the sweep loses its ends.
+        d.arc([s * 0.08, s * 0.16, s * 0.92, s * 1.00],
+              start=180, end=360, fill=c, width=lw)
+        d.line([(s * 0.50, s * 0.60), (s * 0.74, s * 0.30)], fill=c, width=lw)
+        d.ellipse([s * 0.43, s * 0.53, s * 0.57, s * 0.67], fill=c)
+
     def _make_btn(self, parent, text, bg_c, fg_c, cmd, border=None):
         """Generic pill-style button.  Kept for non-tab use (e.g. inside the
         radio toolbar)."""
@@ -1686,38 +1826,58 @@ class ApexAI:
         label.bind("<Leave>", lambda e, f=frame: self._btn_hover(f, False))
         return frame
 
-    def _make_tab(self, parent, text, cmd, secondary=False, num=None):
+    def _make_tab(self, parent, text, cmd, secondary=False, num=None,
+                  icon=None):
         """Console-switch nav control, styled like a steering-wheel button:
-        a bordered dark module with a mono numbered key ("01") beside an
-        uppercase label, and a bottom light-bar that glows F1 red when the
-        mode is engaged."""
+        a bordered dark module with the mode's glyph beside an uppercase
+        label, and a bottom light-bar that glows F1 red when the mode is
+        engaged.
+
+        `icon` names a painter from the `_icon_*` family.  `num` is the
+        older mono index key ("01") and still works as the fallback when
+        PIL is unavailable, so a Pillow-less install degrades to the
+        numbered console rather than to a bare word.
+        """
         fg_default = MUTED if secondary else GRAY
         wrap = tk.Frame(parent, bg=BG_SURFACE, cursor="hand2",
                         highlightbackground=BORDER, highlightthickness=1)
         body = tk.Frame(wrap, bg=BG_SURFACE, cursor="hand2")
         body.pack(fill=tk.X)
+
+        icon_lbl = None
+        idle_icon = self._tab_icon(icon, self._TAB_ICON_IDLE) if icon else None
+        if idle_icon is not None:
+            icon_lbl = tk.Label(body, image=idle_icon, bg=BG_SURFACE,
+                                padx=0, pady=7, cursor="hand2")
+            icon_lbl.image = idle_icon
+            icon_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
         num_lbl = None
-        if num:
+        if num and icon_lbl is None:
             num_lbl = tk.Label(body, text=num,
                                font=(self.MONO, 8),
                                fg=MUTED, bg=BG_SURFACE,
                                padx=0, pady=7, cursor="hand2")
             num_lbl.pack(side=tk.LEFT, padx=(10, 0))
+        lead = icon_lbl or num_lbl
         lbl = tk.Label(body, text=text,
                         font=(self.MONO, 10, "bold"),
                         fg=fg_default, bg=BG_SURFACE,
-                        padx=10, pady=7, cursor="hand2")
-        lbl.pack(side=tk.LEFT, padx=(0, 4 if num else 0))
+                        padx=9 if icon_lbl is not None else 10, pady=7,
+                        cursor="hand2")
+        lbl.pack(side=tk.LEFT, padx=(0, 4 if lead else 0))
         # Bottom light-bar: glows red when the mode is engaged.
         underline = tk.Frame(wrap, bg="#101016", height=3)
         underline.pack(fill=tk.X)
-        widgets = [wrap, body, lbl] + ([num_lbl] if num_lbl else [])
+        widgets = [wrap, body, lbl] + [w for w in (num_lbl, icon_lbl) if w]
         for w in widgets:
             w.bind("<Button-1>", lambda e: cmd())
             w.bind("<Enter>", lambda e, t=wrap: self._tab_hover(t, True))
             w.bind("<Leave>", lambda e, t=wrap: self._tab_hover(t, False))
         wrap._label = lbl
         wrap._num = num_lbl
+        wrap._icon_lbl = icon_lbl
+        wrap._icon_name = icon
         wrap._body = body
         wrap._underline = underline
         wrap._default_fg = fg_default
@@ -1767,6 +1927,19 @@ class ApexAI:
         tab._label.configure(bg=bg)
         if tab._num is not None:
             tab._num.configure(bg=bg)
+        if getattr(tab, "_icon_lbl", None) is not None:
+            tab._icon_lbl.configure(bg=bg)
+
+    def _set_tab_icon_tint(self, tab, color):
+        """Repaint a tab's glyph in `color` (icons carry no state of their
+        own, so the engaged look is just a differently-tinted render)."""
+        lbl = getattr(tab, "_icon_lbl", None)
+        if lbl is None:
+            return
+        img = self._tab_icon(tab._icon_name, color)
+        if img is not None:
+            lbl.configure(image=img)
+            lbl.image = img
 
     def _tab_hover(self, tab, entering):
         if tab._active:
@@ -1800,6 +1973,7 @@ class ApexAI:
                 btn._label.configure(fg=btn._default_fg)
                 if btn._num is not None:
                     btn._num.configure(fg=MUTED)
+                self._set_tab_icon_tint(btn, self._TAB_ICON_IDLE)
                 btn._underline.configure(bg="#101016")
                 btn.configure(highlightbackground=BORDER)
             else:
@@ -1814,6 +1988,7 @@ class ApexAI:
                 active_btn._label.configure(fg=WHITE)
                 if active_btn._num is not None:
                     active_btn._num.configure(fg=GOLD_GLOW)
+                self._set_tab_icon_tint(active_btn, GOLD_GLOW)
                 active_btn._underline.configure(bg=F1_RED)
                 active_btn.configure(highlightbackground=F1_RED)
             else:
@@ -4048,6 +4223,18 @@ class ApexAI:
         self._tel_canvas.create_window((0, 0), window=self._tel_inner,
                                        anchor="nw")
         self._tel_canvas.configure(yscrollcommand=sb.set)
+
+        # Pin the scrolled frame to the viewport width.  Without this the
+        # inner frame sizes to its content, and the summary row — which
+        # lays the delta hero out in its own grid column — runs off the
+        # right edge with no horizontal scrollbar to reach it.  Guarded on
+        # `find_all()` because the canvas emits Configure while empty.
+        def _fit_inner(e):
+            items = self._tel_canvas.find_all()
+            if items:
+                self._tel_canvas.itemconfigure(items[0], width=e.width)
+
+        self._tel_canvas.bind("<Configure>", _fit_inner)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self._tel_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -4059,14 +4246,62 @@ class ApexAI:
             w.bind("<MouseWheel>", _wheel)
         self._tel_wheel = _wheel
 
-        tk.Label(self._tel_inner,
-                 text="Choose a session, then a driver and lap on each side.\n"
-                      "Turn LINK SESSIONS off to compare across sessions or "
-                      "seasons.",
-                 font=("Helvetica Neue", 11), fg=MUTED, bg=BG,
-                 justify=tk.LEFT).pack(anchor="w", pady=24)
-
+        self._tel_placeholder()
         self._tel_link_changed()
+
+    def _tel_placeholder(self):
+        """Empty state for the results pane.
+
+        Two lines of grey text left the tab looking broken before the first
+        comparison, so this states what the feature does and spells out the
+        three overlays it can produce — which is also the least obvious
+        thing about it, since all three are the same control.
+        """
+        card = tk.Frame(self._tel_inner, bg=BG_CARD,
+                        highlightbackground=BORDER, highlightthickness=1)
+        card.pack(anchor="w", pady=20, fill=tk.X)
+        inner = tk.Frame(card, bg=BG_CARD, padx=22, pady=20)
+        inner.pack(anchor="w", fill=tk.X)
+
+        head = tk.Frame(inner, bg=BG_CARD)
+        head.pack(anchor="w")
+        mark = self._tab_icon("gauge", GOLD, 40)
+        if mark is not None:
+            lbl = tk.Label(head, image=mark, bg=BG_CARD)
+            lbl.image = mark
+            lbl.pack(side=tk.LEFT, padx=(0, 14))
+        title = tk.Frame(head, bg=BG_CARD)
+        title.pack(side=tk.LEFT)
+        tk.Label(title, text="Overlay two laps",
+                 font=("Helvetica Neue", 15, "bold"), fg=WHITE,
+                 bg=BG_CARD).pack(anchor="w")
+        tk.Label(title,
+                 text="Pick a session, then a driver and lap on each side, "
+                      "and hit COMPARE LAPS.",
+                 font=("Helvetica Neue", 11), fg=GRAY,
+                 bg=BG_CARD).pack(anchor="w", pady=(2, 0))
+
+        tk.Frame(inner, bg=BORDER, height=1).pack(fill=tk.X, pady=(16, 12))
+
+        for accent, name, blurb in (
+            (GOLD, "LAP VS LAP",
+             "Two team-mates in the same race — where the time actually goes."),
+            ("#4FA3FF", "COMPOUND VS COMPOUND",
+             "The same driver on softs and on hards, side by side."),
+            ("#57C77E", "YEAR VS YEAR",
+             "The same corner a season apart. Turn LINK SESSIONS off to "
+             "reach across weekends."),
+        ):
+            line = tk.Frame(inner, bg=BG_CARD)
+            line.pack(anchor="w", fill=tk.X, pady=3)
+            tk.Frame(line, bg=accent, width=4, height=26).pack(
+                side=tk.LEFT, padx=(0, 10), fill=tk.Y)
+            text = tk.Frame(line, bg=BG_CARD)
+            text.pack(side=tk.LEFT)
+            tk.Label(text, text=name, font=(self.MONO, 9, "bold"),
+                     fg=accent, bg=BG_CARD).pack(anchor="w")
+            tk.Label(text, text=blurb, font=("Helvetica Neue", 10),
+                     fg=GRAY, bg=BG_CARD).pack(anchor="w")
 
     def _build_tel_side(self, parent, side, accent):
         """One row of the comparison picker: session + driver + lap."""
@@ -4338,23 +4573,45 @@ class ApexAI:
 
         self._tel_canvas.yview_moveto(0)
 
+    # Full-scale of the delta advantage bar, in seconds.  A second and a
+    # half covers the overwhelming majority of same-circuit pairs; wider
+    # gaps peg the bar rather than squashing every normal comparison into
+    # the middle of it.
+    _TEL_DELTA_SCALE = 1.5
+
     def _render_tel_summary(self, parent, comparison):
-        """Two lap cards side by side plus the headline delta."""
+        """Two lap cards side by side plus the headline delta.
+
+        Laid out on a grid rather than packed left-to-right: the lap cards
+        share the free width evenly (so a long event name can't shove the
+        delta off the edge) while the delta hero keeps its own column.
+        """
         row = tk.Frame(parent, bg=BG)
         row.pack(fill=tk.X, pady=(8, 0))
+        row.columnconfigure(0, weight=1, uniform="lap")
+        row.columnconfigure(2, weight=1, uniform="lap")
         c_a, c_b = self._tel_pair_colors(comparison)
 
-        for lap, color in ((comparison.ref, c_a), (comparison.other, c_b)):
+        for col, (lap, color) in enumerate(((comparison.ref, c_a),
+                                            (comparison.other, c_b))):
             card = tk.Frame(row, bg=BG_CARD, highlightbackground=BORDER,
                             highlightthickness=1)
-            card.pack(side=tk.LEFT, padx=(0, 10))
+            card.grid(row=0, column=col * 2, sticky="nsew",
+                      padx=(0, 0) if col else (0, 8))
             inner = tk.Frame(card, bg=BG_CARD, padx=14, pady=10)
-            inner.pack()
+            inner.pack(fill=tk.BOTH, expand=True)
 
             head = tk.Frame(inner, bg=BG_CARD)
-            head.pack(anchor="w")
-            tk.Frame(head, bg=color, width=5, height=20).pack(
+            head.pack(anchor="w", fill=tk.X)
+            tk.Frame(head, bg=color, width=5, height=22).pack(
                 side=tk.LEFT, padx=(0, 8), fill=tk.Y)
+            # Team mark next to the code — the fastest way to read which
+            # car you are looking at.
+            logo = self._logo(lap.team, 22)
+            if logo is not None:
+                badge = tk.Label(head, image=logo, bg=BG_CARD)
+                badge.image = logo
+                badge.pack(side=tk.LEFT, padx=(0, 8))
             tk.Label(head, text=lap.driver,
                      font=("Helvetica Neue", 17, "bold"),
                      fg=WHITE, bg=BG_CARD).pack(side=tk.LEFT)
@@ -4368,41 +4625,88 @@ class ApexAI:
                      font=("Helvetica Neue", 10), fg=GRAY,
                      bg=BG_CARD).pack(anchor="w", pady=(3, 0))
 
+            # Stats wrap onto a 3-column grid rather than a single row:
+            # once the two cards share the width, five cells in a row run
+            # past the card edge and the last one gets clipped.
             stats = tk.Frame(inner, bg=BG_CARD)
-            stats.pack(anchor="w", pady=(7, 0))
+            stats.pack(anchor="w", pady=(7, 0), fill=tk.X)
             tyre = (lap.compound or "—").title()
             if lap.tyre_life:
                 tyre += f" · {int(lap.tyre_life)} laps"
-            for label, value, tint in (
+            for i, (label, value, tint) in enumerate((
                 ("TYRE", tyre, teldata.compound_color(lap.compound)),
                 ("TOP", f"{lap.top_speed:.0f} km/h", None),
                 ("AVG", f"{lap.avg_speed:.0f} km/h", None),
                 ("WOT", f"{lap.wot_pct:.0f}%", None),
                 ("BRAKE", f"{lap.braking_pct:.0f}%", None),
-            ):
+            )):
                 cell = tk.Frame(stats, bg=BG_CARD)
-                cell.pack(side=tk.LEFT, padx=(0, 16))
+                cell.grid(row=i // 3, column=i % 3, sticky="w",
+                          padx=(0, 14), pady=(0, 3))
                 tk.Label(cell, text=label, font=(self.MONO, 7), fg=MUTED,
                          bg=BG_CARD).pack(anchor="w")
                 tk.Label(cell, text=value, font=(self.MONO, 10, "bold"),
                          fg=tint or WHITE, bg=BG_CARD).pack(anchor="w")
 
-        # Headline delta card.
-        delta = comparison.final_delta
-        faster = comparison.ref if (delta or 0) > 0 else comparison.other
-        d_card = tk.Frame(row, bg=BG_CARD, highlightbackground=GOLD,
-                          highlightthickness=1)
-        d_card.pack(side=tk.LEFT)
-        d_in = tk.Frame(d_card, bg=BG_CARD, padx=16, pady=10)
-        d_in.pack()
-        tk.Label(d_in, text="LAP DELTA", font=(self.MONO, 7), fg=MUTED,
+        # "VS" tab between the two cards.
+        vs = tk.Frame(row, bg=BG)
+        vs.grid(row=0, column=1, padx=8)
+        tk.Label(vs, text="VS", font=(self.MONO, 9, "bold"), fg=MUTED,
+                 bg=BG).pack(expand=True)
+
+        self._render_tel_delta(row, comparison, c_a, c_b)
+
+    def _render_tel_delta(self, row, comparison, c_a, c_b):
+        """Headline delta: the number, who owns it, and a bar showing the
+        size of the advantage in the faster car's colour."""
+        delta = comparison.final_delta or 0.0
+        ref_faster = delta > 0          # delta is other - ref
+        faster = comparison.ref if ref_faster else comparison.other
+        tint = c_a if ref_faster else c_b
+
+        card = tk.Frame(row, bg=BG_CARD, highlightbackground=tint,
+                        highlightthickness=1)
+        card.grid(row=0, column=3, sticky="nsew", padx=(8, 0))
+        inner = tk.Frame(card, bg=BG_CARD, padx=16, pady=10)
+        inner.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(inner, text="LAP DELTA", font=(self.MONO, 7), fg=MUTED,
                  bg=BG_CARD).pack(anchor="w")
-        tk.Label(d_in, text=f"{teldata.fmt_delta(delta)}s",
-                 font=(self.MONO, 20, "bold"), fg=GOLD,
+        tk.Label(inner, text=f"{teldata.fmt_delta(delta)}s",
+                 font=(self.MONO, 20, "bold"), fg=tint,
                  bg=BG_CARD).pack(anchor="w")
-        tk.Label(d_in, text=f"{faster.driver} faster",
-                 font=("Helvetica Neue", 10), fg=GRAY,
-                 bg=BG_CARD).pack(anchor="w")
+
+        head = tk.Frame(inner, bg=BG_CARD)
+        head.pack(anchor="w")
+        tk.Label(head, text=faster.driver, font=("Helvetica Neue", 10, "bold"),
+                 fg=WHITE, bg=BG_CARD).pack(side=tk.LEFT)
+        tk.Label(head, text="faster", font=("Helvetica Neue", 10), fg=GRAY,
+                 bg=BG_CARD).pack(side=tk.LEFT, padx=(4, 0))
+
+        width, height, mid = 168, 7, 84
+        bar = tk.Canvas(inner, width=width, height=height, bg=BG_CARD,
+                        highlightthickness=0, bd=0)
+        bar.pack(anchor="w", pady=(7, 2))
+        bar.create_rectangle(0, 2, width, height - 2, fill=BG_SURFACE,
+                             outline="")
+        reach = min(abs(delta) / self._TEL_DELTA_SCALE, 1.0) * (mid - 2)
+        if ref_faster:
+            bar.create_rectangle(mid - reach, 0, mid, height,
+                                 fill=tint, outline="")
+        else:
+            bar.create_rectangle(mid, 0, mid + reach, height,
+                                 fill=tint, outline="")
+        bar.create_line(mid, 0, mid, height, fill=MUTED)
+
+        scale = tk.Frame(inner, bg=BG_CARD)
+        scale.pack(anchor="w", fill=tk.X)
+        tk.Label(scale, text=comparison.ref.driver, font=(self.MONO, 7),
+                 fg=c_a, bg=BG_CARD).pack(side=tk.LEFT)
+        tk.Label(scale, text=f"±{self._TEL_DELTA_SCALE:g}s",
+                 font=(self.MONO, 7), fg=MUTED,
+                 bg=BG_CARD).pack(side=tk.LEFT, expand=True)
+        tk.Label(scale, text=comparison.other.driver, font=(self.MONO, 7),
+                 fg=c_b, bg=BG_CARD).pack(side=tk.RIGHT)
 
     def _tel_style_axis(self, ax, ylabel, last=False):
         ax.set_facecolor(BG_CARD)

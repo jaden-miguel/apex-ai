@@ -62,12 +62,19 @@ scrubbable data-driven replay of any session since 2018.
 - **Racing-console GUI** (`app.py`) — Tk + PIL interface styled like a
   steering-wheel / pit-wall console: a telemetry header cluster with a
   pulsing SYS LED, live session clock, and model/accuracy readouts; six
-  numbered console-button tabs (*01 Predict*, *02 Backtest*,
-  *03 Visualization*, *04 Team Radio*, *05 Replays*, *06 Telemetry*)
-  with red engaged
+  console-button tabs (*Predict*, *Backtest*, *Visualization*,
+  *Team Radio*, *Replays*, *Telemetry*) with red engaged
   light-bars; monospace telemetry fonts throughout; a carbon-fiber cap
   strip; and a timing-bar footer — plus a one-click *Refresh* to
   retrain on the latest data.
+  - **Each tab leads with its own glyph** — a chequered flag for the
+    pick, bars for the backtest, a circuit silhouette for the map, a
+    microphone for radio, a replay loop for the replays hub, a
+    speedometer for telemetry. They are drawn procedurally with PIL
+    rather than shipped as image files, so the engaged state is just a
+    re-tint of the same path and they stay sharp at any size (each is
+    painted at 4× and downsampled). A Pillow-less install falls back to
+    the original numbered keys rather than to bare words.
   - **Home button:** the F1 logo + "ApexAI" wordmark in the header
     return you to the last predicted race from anywhere in the app.
   - **30 fps animated track-map visualisation** with per-driver dots,

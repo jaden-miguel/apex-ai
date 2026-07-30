@@ -243,9 +243,16 @@ last, and each mode is built lazily the first time it is shown.
     is what makes F6.4's closing delta match the lap times shown beside
     it.
 - **F6.4.** Rendered output:
-  - Summary cards per lap: lap time, event/session/lap, tyre compound
-    + age, top speed, average speed, wide-open-throttle %, braking %.
-  - Headline **lap delta** with the faster driver named.
+  - Summary cards per lap: team mark, driver code in the livery colour,
+    lap time, event/session/lap, tyre compound + age, top speed, average
+    speed, wide-open-throttle %, braking %. The two cards share the
+    width evenly on a grid, split by a `VS` divider, and their stat
+    cells wrap onto three columns so nothing clips when the pane is
+    narrow.
+  - Headline **lap delta**: the signed gap, the faster driver named, and
+    an advantage bar filling from centre toward the faster car in that
+    car's colour on a ±1.5 s scale. The card is bordered in the winning
+    car's colour.
   - Trace stack against distance: **speed**, **running delta**
     (filled toward whoever is ahead), **throttle**, **brake + DRS**
     bands, and **gear**.
@@ -263,6 +270,14 @@ last, and each mode is built lazily the first time it is shown.
 - **F6.7.** All loading happens on worker threads with progress
   reported inline; stale results are discarded if the selection moves
   on while a fetch is in flight.
+- **F6.8.** Before the first comparison the results pane shows a
+  placeholder card — the telemetry mark, what the tab does, and the
+  three overlays it produces (lap vs lap, compound vs compound, year vs
+  year). Those three are the least obvious thing about the feature,
+  since all three come out of the same control.
+- **F6.9.** The results pane is pinned to the viewport width. Without
+  it the scrolled frame sizes to its content and the delta hero runs off
+  the right edge with no horizontal scrollbar to reach it.
 
 ### 6.7 Replays — Live Session
 
@@ -307,6 +322,17 @@ The data-driven half of the **Replays** tab (see 6.5 for the switch).
   resets the view state.
 - **F8.2.** Hover affordance: brand mark dims/brightens to telegraph
   that it's interactive.
+- **F8.3.** Every console tab leads with its own glyph: chequered flag
+  (Predict), bar chart (Backtest), circuit silhouette (Visualization),
+  microphone (Team Radio), replay loop (Replays), speedometer
+  (Telemetry), circular arrow (Refresh).
+  - Icons are painted procedurally with PIL, not shipped as assets, so
+    the engaged state is the same path re-tinted rather than a second
+    file, and any size renders sharp (drawn at 4×, downsampled LANCZOS).
+  - Idle glyphs use `GRAY`, engaged `GOLD_GLOW`, matching the index keys
+    they replace — except a shape needs more weight than a numeral, so
+    `MUTED` was too faint to survive at 17 px.
+  - Without Pillow the tabs fall back to the original numbered keys.
 
 ### 6.9 Launch Path
 
