@@ -86,16 +86,33 @@ two lap times; see the alignment notes below.*
     the original numbered keys rather than to bare words.
   - **Home button:** the F1 logo + "ApexAI" wordmark in the header
     return you to the last predicted race from anywhere in the app.
-  - **30 fps animated track-map visualisation** with per-driver dots,
+  - **60 fps animated track-map visualisation** with per-driver dots,
     automatic MOM (Maximum Overtake Moment) zone detection on the
     longest straights, hand-traced real circuit silhouettes, and a
     podium card featuring procedural anti-aliased gold / silver /
     bronze trophies plus a laurel wreath.
+  - **Anti-aliased circuit rendering.** Tk's canvas cannot anti-alias, so
+    the track used to stair-step around every corner. The surface, its
+    outer glow, the track-limit lines and the red/white kerbs are now
+    drawn into one supersampled PIL image, and the cars are pre-rendered
+    sprites rather than `create_oval`. That also collapses the map from
+    several hundred canvas items to a few dozen, which is what pays for
+    the jump from 30 to 60 fps.
   - **Per-race ambient theming:** sakura petals at Suzuka, maple leaves
     at Montréal, Mediterranean sun over Monaco, carnival confetti at
     Interlagos and Mexico City, neon + fireworks on the Vegas Strip,
     rain over Silverstone and Spa, starlit skies over the desert
-    circuits, and more.
+    circuits, and more. Particle counts scale with the canvas, so
+    weather still reads as weather on a maximised window.
+  - **Scenery that respects the circuit.** Trees, cacti and grandstands
+    are placed by offsetting along the track normal, which only knows
+    about the segment it started from; anywhere the lap doubles back
+    (most of Spa, Suzuka's crossover) that put trees on the racing
+    surface. Every placement now tests against a spatial index of the
+    whole lap. The trees themselves are anti-aliased sprites with
+    contact shadows, the skyline is a two-layer ridge that fades into
+    the sky rather than a row of clipped triangles, and the grass verge
+    is a soft-edged band instead of a hard Tk outline.
   - **Singleton enforcement**: launching `app.py` while another
     instance is open kills the prior PID (with `SIGKILL` fallback) and
     sweeps the OS process list so stale instances from terminals or

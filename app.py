@@ -38,7 +38,8 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageFilter
+    from PIL import (Image, ImageTk, ImageDraw, ImageFont, ImageFilter,
+                     ImageChops)
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -744,18 +745,22 @@ def _make_maple_leaf_image(size: int = 18, color=(213, 43, 30, 245)):
     return _ambient_cache_put(key, img)
 
 
-def _maple_leaf_rotation_frames(size: int, frame_count: int = 6):
+def _maple_leaf_rotation_frames(size: int, frame_count: int = 6,
+                                color=(213, 43, 30, 245)):
     """Pre-render a small set of rotated maple-leaf frames so tumbling
     leaves can swap images at runtime instead of paying for a fresh
-    PIL.Image.rotate every animation tick."""
+    PIL.Image.rotate every animation tick.
+
+    `color` lets the same sprite serve Montreal's red maple and the mixed
+    autumn palette the generic "leaf" ambient picks from."""
     if not HAS_PIL:
         return []
-    key = ("maple_rot", int(size), int(frame_count))
+    key = ("maple_rot", int(size), int(frame_count), tuple(color))
     cached = _ambient_cache_get(key)
     if cached is not None:
         return cached
 
-    base = _make_maple_leaf_image(size)
+    base = _make_maple_leaf_image(size, color)
     if base is None:
         return []
 
@@ -5620,6 +5625,142 @@ class ApexAI:
                     (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
         return (x, y)
 
+    # Supersampling factor for the track ribbon.  2x with a BOX downsample
+    # is the sweet spot: BOX is an exact area average, so it is the ideal
+    # anti-aliasing filter for an integer downscale *and* several times
+    # cheaper than LANCZOS.  3x/LANCZOS looked identical and cost 6.4 s of
+    # the 9.3 s the tab used to spend building itself.
+    _RIBBON_SS = 2
+    # Car markers are supersampled too, but harder: they move every frame,
+    # so each is a pre-rendered sprite that only gets repositioned.
+    _DOT_SS = 4
+
+    def _dot_sprite(self, color, radius, ring=None, alpha=255, glow=False):
+        """Anti-aliased circular car marker, memoised per appearance.
+
+        Tk's create_oval is the other visibly aliased element on the map,
+        and at 4-8 px radius the jaggies are proportionally worst.  A sprite
+        also lets a trail fade with real alpha instead of Tk's `stipple`,
+        which is a 25 % checkerboard and reads as dithered grit rather than
+        as a fading tail.
+        """
+        if not HAS_PIL:
+            return None
+        key = ("dot", color, radius, ring, alpha, glow)
+        if key in self._icon_cache:
+            return self._icon_cache[key]
+
+        s = self._DOT_SS
+        pad = radius + (radius * 1.6 if glow else 2)
+        size = int(pad * 2)
+        img = Image.new("RGBA", (size * s, size * s), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        c = pad * s
+        rgb = self._hex_rgb(color)
+
+        if glow:
+            # Radial falloff built from concentric rings; cheap and smooth
+            # once downsampled.
+            steps = 14
+            for k in range(steps, 0, -1):
+                f = k / steps
+                rr = radius * s * (1.0 + 1.55 * f)
+                a = int(64 * (1.0 - f) ** 2)
+                if a <= 0:
+                    continue
+                d.ellipse([c - rr, c - rr, c + rr, c + rr],
+                          fill=rgb + (a,))
+
+        r = radius * s
+        d.ellipse([c - r, c - r, c + r, c + r], fill=rgb + (alpha,))
+        if ring:
+            d.ellipse([c - r, c - r, c + r, c + r],
+                      outline=self._hex_rgb(ring) + (alpha,),
+                      width=max(1, int(1.6 * s)))
+
+        img = img.resize((size, size), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        self._icon_cache[key] = photo
+        return photo
+
+    @staticmethod
+    def _hex_rgb(value):
+        v = value.lstrip("#")
+        return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
+
+
+    def _render_track_ribbon(self, cw, ch, track, hw, tw, kerb_idx):
+        """Draw the track surface, borders and kerbs as one anti-aliased image.
+
+        Returns a PhotoImage sized to the canvas, or None without Pillow.
+
+        Everything is painted at `_RIBBON_SS` scale and resized down with
+        LANCZOS, which is what removes the aliasing.  Layers, outermost
+        first: a soft outer glow that lifts the circuit off the background,
+        the asphalt body, a lighter inner seam that reads as camber, the two
+        white track-limit lines, and red/white kerbs on the corners.
+        """
+        if not HAS_PIL or cw <= 0 or ch <= 0:
+            return None
+        s = self._RIBBON_SS
+        img = Image.new("RGBA", (int(cw * s), int(ch * s)), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+
+        loop = [(x * s, y * s) for (x, y) in track]
+        loop.append(loop[0])
+
+        # The glow passes are the widest strokes here and `joint="curve"`
+        # emits a filled polygon per vertex, so they dominate the cost.
+        # They are also the softest thing on screen, where a halved point
+        # density is invisible.
+        coarse = loop[::2]
+        if coarse[-1] != loop[-1]:
+            coarse.append(loop[-1])
+
+        def stroke(width, color, pts=None):
+            d.line(pts or loop, fill=color, width=max(1, int(width * s)),
+                   joint="curve")
+
+        # Outer glow: two widening passes at low alpha.  A single wide
+        # stroke would read as a hard halo; stacking them fades outward.
+        for grow, alpha in ((9, 34), (4, 60)):
+            stroke(tw + grow, (12, 12, 20, alpha), coarse)
+
+        stroke(tw + 2, (22, 22, 30, 255))       # kerb apron / verge
+        stroke(tw, (17, 17, 25, 255))           # asphalt
+        stroke(max(2, tw * 0.55), (23, 23, 33, 255))   # camber highlight
+
+        # Track limits: a thin white line either side of the centreline.
+        for side in (1, -1):
+            edge = []
+            for i in range(len(track)):
+                nx, ny = self._track_normal(track, i)
+                edge.append(((track[i][0] + nx * hw * side) * s,
+                             (track[i][1] + ny * hw * side) * s))
+            edge.append(edge[0])
+            d.line(edge, fill=(58, 58, 74, 235),
+                   width=max(1, int(1.4 * s)), joint="curve")
+
+        # Kerbs: alternating red and white blocks laid along the corner,
+        # which is what a real kerb looks like from above.
+        kerb_w = max(2.0, hw * 0.30)
+        for n, i in enumerate(kerb_idx):
+            if i % 3:
+                continue
+            nx, ny = self._track_normal(track, i)
+            colour = (225, 6, 0, 255) if (n // 3) % 2 == 0 else (238, 238, 242, 255)
+            j = (i + 3) % len(track)
+            for side in (1, -1):
+                a = ((track[i][0] + nx * hw * side) * s,
+                     (track[i][1] + ny * hw * side) * s)
+                mx, my = self._track_normal(track, j)
+                b = ((track[j][0] + mx * hw * side) * s,
+                     (track[j][1] + my * hw * side) * s)
+                d.line([a, b], fill=colour, width=max(1, int(kerb_w * s)))
+
+        img = img.resize((int(cw), int(ch)), Image.BOX)
+        return ImageTk.PhotoImage(img)
+
     def _interpolate_track(self, raw_pts, num_out=400):
         n = len(raw_pts)
         pts = []
@@ -5695,16 +5836,28 @@ class ApexAI:
         s = min(cw, ch) / 800.0
         num = len(track)
         tw = int(hw * 2)
+        # Every scenery placement below tests against this.
+        self._build_track_clearance(track, hw)
 
-        flat = []
-        for p in track:
-            flat.extend(p)
-        # `smooth=True` on a 500-vertex polygon with this wide an outline
-        # is a heavy per-frame cost (Tk re-tessellates whenever a dot moves
-        # over it).  The interpolated track is already smooth enough at
-        # this density.
-        canvas.create_polygon(flat, outline=ground_color, fill="",
-                              width=tw * 3)
+        # Sky wash first, then the grass the circuit sits on.  Both were
+        # flat fills before: the canvas was one colour and the verge was a
+        # hard-edged Tk polygon whose outline stair-stepped around every
+        # corner and stopped dead at its own border.
+        sky = self._render_sky(cw, ch)
+        if sky is not None:
+            self._tk_images.append(sky)
+            canvas.create_image(0, 0, image=sky, anchor="nw")
+
+        verge = self._render_ground_verge(cw, ch, track, hw, ground_color)
+        if verge is not None:
+            self._tk_images.append(verge)
+            canvas.create_image(0, 0, image=verge, anchor="nw")
+        else:
+            flat = []
+            for p in track:
+                flat.extend(p)
+            canvas.create_polygon(flat, outline=ground_color, fill="",
+                                  width=tw * 3)
 
         for feat in features:
             try:
@@ -5714,7 +5867,7 @@ class ApexAI:
                 elif kind == "water":
                     self._s_water_edge(canvas, cw, ch, feat[1], s)
                 elif kind == "mountains":
-                    self._s_mountain_range(canvas, cw, ch * 0.06, feat[1], s)
+                    self._s_mountain_range(canvas, cw, ch * 0.17, feat[1], s)
                 elif kind == "dunes":
                     self._s_dune_field(canvas, cw, ch, feat[1], s)
                 elif kind in ("buildings", "skyline"):
@@ -5755,7 +5908,212 @@ class ApexAI:
                 except Exception:
                     pass
 
+    # ── Scenery placement ──
+
+    def _render_sky(self, cw, ch):
+        """Vertical sky wash plus a corner vignette.
+
+        A single flat background colour is what made the map read as a
+        diagram.  A few percent of luminance gradient across the canvas,
+        darkened at the corners, gives it depth without becoming a texture
+        that competes with the circuit.
+        """
+        if not HAS_PIL or cw <= 0 or ch <= 0:
+            return None
+        w, h = int(cw), int(ch)
+        # Built small and upscaled: a gradient has no high-frequency detail,
+        # so rendering it at full size is wasted work.
+        sw, sh = 96, max(2, int(96 * h / max(1, w)))
+        base = self._hex_rgb(BG)
+        grad = Image.new("RGB", (1, sh))
+        for y in range(sh):
+            f = y / max(1, sh - 1)
+            # Brightest just below the horizon line, falling away downward.
+            lift = 11 * math.sin(math.pi * min(1.0, f * 1.25)) ** 1.4
+            grad.putpixel((0, y), tuple(
+                min(255, int(c + lift)) for c in base))
+        img = grad.resize((sw, sh), Image.BILINEAR).resize(
+            (w, h), Image.BILINEAR).convert("RGBA")
+
+        # Vignette computed as a smooth radial ramp rather than stacked
+        # ellipses.  Stacking left a visible rim where the largest ellipse
+        # ended, which read as a bright blob sitting over the infield; a
+        # continuous falloff that only starts biting past 60 % of the
+        # radius just darkens the corners, which is the whole point.
+        vw, vh = 128, max(2, int(128 * h / max(1, w)))
+        yy, xx = np.mgrid[0:vh, 0:vw]
+        cxp, cyp = max(1e-6, vw / 2), max(1e-6, vh / 2)
+        r = np.sqrt(((xx - cxp) / cxp) ** 2 + ((yy - cyp) / cyp) ** 2)
+        fall = np.clip((r - 0.62) / 0.80, 0.0, 1.0) ** 1.7 * 104.0
+        vig = Image.fromarray(fall.astype(np.uint8), mode="L").resize(
+            (w, h), Image.BILINEAR)
+        dark = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+        dark.putalpha(vig)
+        img.alpha_composite(dark)
+        return ImageTk.PhotoImage(img)
+
+    def _render_ground_verge(self, cw, ch, track, hw, ground_color):
+        """Soft-edged grass band the circuit is laid on.
+
+        Replaces a Tk polygon outline three track-widths wide, which had
+        a hard aliased boundary and a uniform colour.  Here the band is
+        blurred at its edge so the grass fades into the surroundings, and
+        carries a slight inner darkening so the track looks seated in it
+        rather than pasted on top.
+        """
+        if not HAS_PIL or cw <= 0 or ch <= 0:
+            return None
+        # Built at half resolution and scaled up.  The band's only edge is
+        # a wide Gaussian, which carries no detail a full-resolution buffer
+        # could preserve, so half the linear size is a quarter of the
+        # pixels for an indistinguishable result.
+        half = 0.5
+        size = (max(1, int(cw * half)), max(1, int(ch * half)))
+        loop = [(x * half, y * half) for (x, y) in track]
+        loop.append(loop[0])
+
+        mask = Image.new("L", size, 0)
+        md = ImageDraw.Draw(mask)
+        md.line(loop, fill=190, width=max(1, int(hw * 6 * half)),
+                joint="curve")
+        md.line(loop, fill=255, width=max(1, int(hw * 3.4 * half)),
+                joint="curve")
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=hw * 0.55 * half))
+        mask = mask.resize((int(cw), int(ch)), Image.BILINEAR)
+
+        band = Image.new("RGBA", (int(cw), int(ch)),
+                         self._hex_rgb(ground_color) + (255,))
+        band.putalpha(mask)
+        return ImageTk.PhotoImage(band)
+
+    def _build_track_clearance(self, track, hw):
+        """Bucket the circuit into a coarse grid for fast proximity tests.
+
+        Scenery is positioned by stepping along the centreline and pushing
+        out along the local normal.  That only knows about the piece of
+        track it started from, so anywhere the lap doubles back on itself
+        (Spa's whole middle sector, Suzuka's crossover) the offset lands on
+        *another* part of the circuit and a tree gets planted on the racing
+        surface.  A grid of the full centreline lets every candidate check
+        itself against the entire lap instead of one segment.
+        """
+        cell = max(16.0, hw * 2.0)
+        grid = {}
+        for (x, y) in track:
+            grid.setdefault((int(x // cell), int(y // cell)), []).append((x, y))
+        self._viz_clear_grid = grid
+        self._viz_clear_cell = cell
+
+    def _clear_of_track(self, x, y, min_dist):
+        """True when (x, y) is at least `min_dist` from every track point."""
+        grid = getattr(self, "_viz_clear_grid", None)
+        if not grid:
+            return True
+        cell = self._viz_clear_cell
+        gx, gy = int(x // cell), int(y // cell)
+        # min_dist can exceed one cell, so widen the search to cover it.
+        reach = int(min_dist // cell) + 1
+        limit = min_dist * min_dist
+        for ix in range(gx - reach, gx + reach + 1):
+            for iy in range(gy - reach, gy + reach + 1):
+                for (px, py) in grid.get((ix, iy), ()):
+                    dx, dy = px - x, py - y
+                    if dx * dx + dy * dy < limit:
+                        return False
+        return True
+
+    def _tree_sprite(self, kind, color, height):
+        """Anti-aliased tree, memoised per (kind, colour, height).
+
+        The vector versions were a couple of Tk triangles and a hard-edged
+        oval, which at this scale read as a green tick rather than a tree.
+        Sprites are drawn at 4x with soft canopies and a ground shadow so
+        they sit on the scene instead of floating above it.
+        """
+        if not HAS_PIL:
+            return None
+        h = max(10, int(height))
+        key = ("tree", kind, color, h)
+        if key in self._icon_cache:
+            return self._icon_cache[key]
+
+        ss = 4
+        w = int(h * 0.95)
+        img = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        cx, base = w * ss / 2, h * ss
+        rgb = self._hex_rgb(color)
+        dark = tuple(max(0, int(v * 0.62)) for v in rgb)
+        lit = tuple(min(255, int(v * 1.45) + 12) for v in rgb)
+
+        # Contact shadow: grounds the tree so it doesn't look pasted on.
+        d.ellipse([cx - w * ss * 0.34, base - h * ss * 0.055,
+                   cx + w * ss * 0.34, base + h * ss * 0.035],
+                  fill=(0, 0, 0, 70))
+
+        if kind == "pine":
+            trunk = max(1, int(w * ss * 0.07))
+            d.line([(cx, base), (cx, base - h * ss * 0.28)],
+                   fill=(42, 26, 10, 255), width=trunk)
+            # Three stacked skirts, widest at the bottom.
+            for frac_y, frac_w, fill in ((0.26, 0.46, dark),
+                                         (0.50, 0.37, rgb),
+                                         (0.74, 0.26, lit)):
+                by = base - h * ss * frac_y
+                d.polygon([(cx - w * ss * frac_w, by),
+                           (cx, by - h * ss * 0.34),
+                           (cx + w * ss * frac_w, by)], fill=fill + (255,))
+        elif kind == "palm":
+            trunk = max(1, int(w * ss * 0.09))
+            top = (cx + w * ss * 0.07, base - h * ss * 0.72)
+            d.line([(cx - w * ss * 0.05, base),
+                    (cx, base - h * ss * 0.40), top],
+                   fill=(92, 58, 20, 255), width=trunk, joint="curve")
+            for ang in range(0, 360, 45):
+                rad = math.radians(ang)
+                fx = top[0] + math.cos(rad) * w * ss * 0.44
+                fy = top[1] + math.sin(rad) * h * ss * 0.20 - h * ss * 0.05
+                d.line([top, (fx, fy)], fill=rgb + (255,),
+                       width=max(1, int(w * ss * 0.05)))
+            d.ellipse([top[0] - w * ss * 0.05, top[1] - h * ss * 0.04,
+                       top[0] + w * ss * 0.05, top[1] + h * ss * 0.04],
+                      fill=lit + (255,))
+        else:
+            # deciduous / cherry: overlapping blobs make an irregular crown.
+            trunk = max(1, int(w * ss * 0.08))
+            d.line([(cx, base), (cx, base - h * ss * 0.42)],
+                   fill=(42, 26, 10, 255), width=trunk)
+            r = w * ss * 0.30
+            for ox, oy, rr, fill in ((-0.20, 0.52, 0.92, dark),
+                                     (0.20, 0.55, 0.88, dark),
+                                     (0.00, 0.68, 1.00, rgb),
+                                     (-0.10, 0.74, 0.62, lit)):
+                px = cx + w * ss * ox
+                py = base - h * ss * oy
+                d.ellipse([px - r * rr, py - r * rr, px + r * rr, py + r * rr],
+                          fill=fill + (255,))
+            if kind == "cherry":
+                for ox, oy in ((-0.18, 0.78), (0.16, 0.72), (0.02, 0.86),
+                               (-0.06, 0.62), (0.22, 0.60)):
+                    pr = w * ss * 0.055
+                    px = cx + w * ss * ox
+                    py = base - h * ss * oy
+                    d.ellipse([px - pr, py - pr, px + pr, py + pr],
+                              fill=(255, 183, 197, 255))
+
+        img = img.resize((w, h), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        self._icon_cache[key] = photo
+        return photo
+
     def _s_tree(self, c, x, y, s, kind, color):
+        sprite = self._tree_sprite(kind, color,
+                                   28 * s if kind == "palm" else 22 * s)
+        if sprite is not None:
+            # Anchor south so the trunk meets the ground point.
+            c.create_image(x, y, image=sprite, anchor="s")
+            self._tk_images.append(sprite)
+            return
         tw = max(1, 2 * s)
         if kind == "deciduous":
             c.create_line(x, y, x, y - 14 * s, fill="#2a1a0a", width=tw)
@@ -5790,7 +6148,11 @@ class ApexAI:
 
     def _draw_tree_line(self, c, track, hw, kind, spacing, color, s):
         num = len(track)
-        offset_base = hw * 2.5
+        offset_base = hw * 2.6
+        # A tree must clear the racing surface plus its own canopy, or it
+        # ends up planted on the asphalt wherever the lap runs back beside
+        # itself.  Measured from the centreline, so it includes half-width.
+        min_clear = hw * 2.1
         for i in range(0, num, spacing):
             nx, ny = self._track_normal(track, i)
             for side in (1, -1):
@@ -5800,6 +6162,8 @@ class ApexAI:
                 tree_s = s * (0.6 + ((i * 13) % 7) * 0.08)
                 tx = track[i][0] + nx * dist * side
                 ty = track[i][1] + ny * dist * side
+                if not self._clear_of_track(tx, ty, min_clear):
+                    continue
                 self._s_tree(c, tx, ty, tree_s, kind, color)
 
     def _s_grandstand_at(self, c, track, hw, frac, side, s):
@@ -5837,20 +6201,92 @@ class ApexAI:
         return
 
     def _s_mountain_range(self, c, cw, base_y, count, s):
-        spacing = cw / (count + 1)
-        for i in range(count):
-            mx = spacing * (i + 1) + ((i * 37) % 20 - 10) * s
-            mh = (60 + (i * 23) % 40) * s
-            mw = (40 + (i * 17) % 30) * s
-            c.create_polygon(mx - mw * 1.3, base_y, mx, base_y - mh,
-                             mx + mw * 1.3, base_y, fill="#0a140a", outline="")
-            c.create_polygon(mx - mw, base_y, mx + mw * 0.1,
-                             base_y - mh * 0.8, mx + mw, base_y,
-                             fill="#0e1a0e", outline="")
-            c.create_polygon(mx - mw * 0.15, base_y - mh * 0.65,
-                             mx + mw * 0.1, base_y - mh * 0.8,
-                             mx + mw * 0.25, base_y - mh * 0.65,
-                             fill="#c0c0c8", outline="")
+        """Layered ridge silhouette sitting on the skyline.
+
+        The peaks used to be drawn upward from `ch * 0.06` while standing
+        60-100 px tall, so every summit was clipped off the top of the
+        canvas and what remained read as stray dark wedges.  The range is
+        now anchored *downward* from a horizon that leaves room for the
+        full profile, and is drawn as two overlapping ranges (far one
+        paler, near one darker) so it has depth instead of being a row of
+        identical triangles.
+        """
+        horizon = max(base_y, 74 * s)
+        span = horizon
+        if not HAS_PIL or cw <= 0 or span <= 4:
+            # Vector fallback, still anchored so the peaks fit on-canvas.
+            spacing = cw / (count + 1)
+            for i in range(count):
+                mx = spacing * (i + 1) + ((i * 37) % 20 - 10) * s
+                mh = min(span * 0.9, (60 + (i * 23) % 40) * s)
+                mw = (40 + (i * 17) % 30) * s
+                c.create_polygon(mx - mw * 1.3, horizon, mx, horizon - mh,
+                                 mx + mw * 1.3, horizon,
+                                 fill="#0e1a0e", outline="")
+            return
+
+        ss = 2
+        size = (int(cw * ss), int(span * ss))
+        img = Image.new("RGBA", size, (0, 0, 0, 0))
+        base = span * ss
+
+        # Alpha ramp: opaque along the ridge line, transparent by the
+        # bottom.  Without it the range ends on a hard horizontal edge
+        # spanning the whole canvas, which reads as a slab rather than as
+        # distant hills.
+        ramp = Image.linear_gradient("L").resize(size).point(
+            lambda v: max(0, 255 - int(v * 1.9)))
+
+        # Both ridges sit slightly *lighter* than the canvas (#15151E) so
+        # they read as silhouettes against the sky.  Painted darker than
+        # the background they vanished entirely, leaving the snow caps
+        # hanging in mid-air with no mountain under them.
+        for layer, (rgb, hf, jitter) in enumerate((
+                ((34, 40, 54), 0.55, 0),      # far ridge, hazier
+                ((24, 29, 38), 0.98, 7))):    # near ridge, closer/darker
+            mask = Image.new("L", size, 0)
+            md = ImageDraw.Draw(mask)
+            pts = [(0, base)]
+            n = max(3, count + layer * 2)
+            step = cw * ss / n
+            peaks = []
+            for i in range(n + 1):
+                px = step * i + ((i * 37 + jitter) % 21 - 10) * s * ss
+                # Alternating tall/short summits give a real ridge profile
+                # instead of a row of same-height bumps.
+                tall = 0.62 if (i + jitter) % 2 else 1.0
+                peak = base - span * ss * hf * tall * (
+                    0.60 + ((i * 23 + jitter) % 40) / 80.0)
+                pts.append((px, peak))
+                peaks.append((px, peak))
+            pts.append((cw * ss, base))
+            md.polygon(pts, fill=255)
+            # Ridge silhouette, faded out toward its base by the ramp.
+            layer_img = Image.new("RGBA", size, rgb + (255,))
+            layer_img.putalpha(ImageChops.multiply(mask, ramp))
+            img.alpha_composite(layer_img)
+
+            if layer == 1:
+                # Caps must fade with the ridge they sit on, or the summits
+                # keep full opacity after the rock under them has faded and
+                # they read as grey triangles floating in the sky.
+                cap_mask = Image.new("L", size, 0)
+                ccd = ImageDraw.Draw(cap_mask)
+                for (px, py) in peaks:
+                    if py > base - span * ss * 0.66:
+                        continue
+                    cap = span * ss * 0.11
+                    ccd.polygon([(px - cap * 0.75, py + cap),
+                                 (px, py), (px + cap * 0.75, py + cap)],
+                                fill=225)
+                cap_layer = Image.new("RGBA", size, (122, 132, 148, 255))
+                cap_layer.putalpha(ImageChops.multiply(cap_mask, ramp))
+                img.alpha_composite(cap_layer)
+
+        img = img.resize((int(cw), int(span)), Image.BOX)
+        photo = ImageTk.PhotoImage(img)
+        self._tk_images.append(photo)
+        c.create_image(0, horizon, image=photo, anchor="sw")
 
     def _s_building_row(self, c, cw, ch, side, count, s):
         if side in ("top", "bottom"):
@@ -6018,6 +6454,8 @@ class ApexAI:
                 dist = hw * 3.0 + ((i * 13) % 20) * s
                 cx = track[i][0] + nx * dist * side
                 cy = track[i][1] + ny * dist * side
+                if not self._clear_of_track(cx, cy, hw * 2.1):
+                    continue
                 cs = s * (0.5 + ((i * 7) % 5) * 0.1)
                 c.create_line(cx, cy, cx, cy - 15 * cs,
                               fill=g, width=max(2, 3 * cs))
@@ -6131,29 +6569,6 @@ class ApexAI:
 
         self._draw_scene(canvas, cw, ch, track, hw, self._viz_circuit)
 
-        # ── Track surface ──
-        flat = []
-        for p in track:
-            flat.extend(p)
-        # NOTE: `smooth=True` forces Tk's canvas to *re-tessellate* the Bezier
-        # curve on every dirty-rect redraw.  With ~500 vertices that's the
-        # single biggest per-frame cost the canvas pays whenever a driver
-        # dot moves over the track surface (i.e. every frame).  Our
-        # Catmull-Rom interpolation already produced 500 smooth points, so
-        # the extra smoothing is purely overhead – draw the polygons as
-        # straight-segment polylines and let the density carry the curve.
-        canvas.create_polygon(flat, outline="#16161e", fill="", width=tw + 4)
-        canvas.create_polygon(flat, outline="#111119", fill="", width=tw)
-
-        # ── Borders ──
-        for side_sign in (1, -1):
-            border = []
-            for i in range(num):
-                nx, ny = self._track_normal(track, i)
-                border.extend([track[i][0] + nx * hw * side_sign,
-                               track[i][1] + ny * hw * side_sign])
-            canvas.create_line(border, fill="#2a2a38", width=1.5)
-
         # ── Curvature analysis ──
         # Cross-product magnitude of consecutive segment vectors gives a
         # cheap proxy for local curvature.  A wider `step` smooths out
@@ -6172,9 +6587,38 @@ class ApexAI:
         curv_sorted = sorted(curvatures, reverse=True)
         curv_top = curv_sorted[min(30, num - 1)]
 
-        # ── Kerbs at tight corners ──
-        for i, c in enumerate(curvatures):
-            if c >= curv_top and i % 6 == 0:
+        # ── Track surface, borders and kerbs ──
+        # Drawn into one supersampled PIL image rather than as Tk canvas
+        # polygons.  Tk has no anti-aliasing, so a 200-vertex ribbon at this
+        # width shows a visible staircase on every curve; rendering at 3x
+        # and downsampling gives clean edges, a soft outer glow the canvas
+        # cannot express at all, and alternating red/white kerbs instead of
+        # plain red dots.  It also collapses ~400 canvas items into a single
+        # image, which is what makes the 60 fps loop below affordable.
+        kerb_idx = [i for i, c in enumerate(curvatures) if c >= curv_top]
+        ribbon = self._render_track_ribbon(cw, ch, track, hw, tw, kerb_idx)
+        if ribbon is not None:
+            self._viz_ribbon_tk = ribbon
+            self._tk_images.append(ribbon)
+            canvas.create_image(0, 0, image=ribbon, anchor="nw")
+        else:
+            # No Pillow: fall back to the original flat canvas polygons.
+            flat = []
+            for p in track:
+                flat.extend(p)
+            canvas.create_polygon(flat, outline="#16161e", fill="",
+                                  width=tw + 4)
+            canvas.create_polygon(flat, outline="#111119", fill="", width=tw)
+            for side_sign in (1, -1):
+                border = []
+                for i in range(num):
+                    nx, ny = self._track_normal(track, i)
+                    border.extend([track[i][0] + nx * hw * side_sign,
+                                   track[i][1] + ny * hw * side_sign])
+                canvas.create_line(border, fill="#2a2a38", width=1.5)
+            for i in kerb_idx:
+                if i % 6:
+                    continue
                 nx, ny = self._track_normal(track, i)
                 for ss in (1, -1):
                     kx = track[i][0] + nx * hw * ss
@@ -6506,18 +6950,36 @@ class ApexAI:
         self._label_ids = []
         self._label_visible = [False] * n
 
-        self._glow_id = canvas.create_oval(0, 0, 0, 0, fill="", outline=GOLD_GLOW,
-                                            width=2, state="hidden")
+        # Leader glow: a pre-rendered radial sprite rather than a stroked
+        # oval, so the pulse below fades rather than flickering an outline.
+        self._glow_sprite = self._dot_sprite(GOLD_GLOW, 8, glow=True)
+        if self._glow_sprite is not None:
+            self._tk_images.append(self._glow_sprite)
+            self._glow_id = canvas.create_image(0, 0, image=self._glow_sprite,
+                                                anchor="center",
+                                                state="hidden")
+        else:
+            self._glow_id = canvas.create_oval(0, 0, 0, 0, fill="",
+                                               outline=GOLD_GLOW,
+                                               width=2, state="hidden")
+        self._glow_is_sprite = self._glow_sprite is not None
 
         for i in range(max_anim):
             p = preds[i]
             color = tc(p["team"])
             dot_r = 8 if i == 0 else 6 if i < 3 else 4
 
-            dot = canvas.create_oval(
-                sf[0] - dot_r, sf[1] - dot_r, sf[0] + dot_r, sf[1] + dot_r,
-                fill=color, outline=WHITE if i == 0 else color,
-                width=2 if i == 0 else 1)
+            sprite = self._dot_sprite(color, dot_r,
+                                      ring=WHITE if i == 0 else None)
+            if sprite is not None:
+                self._tk_images.append(sprite)
+                dot = canvas.create_image(sf[0], sf[1], image=sprite,
+                                          anchor="center")
+            else:
+                dot = canvas.create_oval(
+                    sf[0] - dot_r, sf[1] - dot_r, sf[0] + dot_r, sf[1] + dot_r,
+                    fill=color, outline=WHITE if i == 0 else color,
+                    width=2 if i == 0 else 1)
             self._dot_ids.append(dot)
 
             txt = canvas.create_text(sf[0], sf[1], text=str(i + 1),
@@ -6525,17 +6987,29 @@ class ApexAI:
                                      fill=WHITE if i < 3 else BG)
             self._dot_txt_ids.append(txt)
 
-            # Trails only for top 3
+            # Trails only for top 3.  Each tail segment is its own sprite at
+            # a decreasing radius and alpha, so the tail actually fades out.
             trails = []
             if i < 3:
-                for t_off in range(1, 3):
-                    tr_r = dot_r * (1 - t_off * 0.3)
-                    tr = canvas.create_oval(0, 0, 0, 0, fill=color, outline="",
-                                            stipple="gray25" if t_off == 1 else "gray12",
-                                            state="hidden")
+                for t_off in range(1, 4):
+                    tr_r = dot_r * (1 - t_off * 0.22)
+                    tail = self._dot_sprite(
+                        color, tr_r, alpha=int(150 * (1 - t_off * 0.28)))
+                    if tail is not None:
+                        self._tk_images.append(tail)
+                        tr = canvas.create_image(0, 0, image=tail,
+                                                 anchor="center",
+                                                 state="hidden")
+                    else:
+                        tr = canvas.create_oval(
+                            0, 0, 0, 0, fill=color, outline="",
+                            stipple="gray25" if t_off == 1 else "gray12",
+                            state="hidden")
                     trails.append(tr_r)
                     trails.append(tr)
             self._trail_ids.append(trails)
+            if i == 0:
+                self._dots_are_sprites = sprite is not None
 
             bg_fill = GOLD_DIM if i == 0 else BG_CARD
             border_w = 2 if i < 3 else 1
@@ -6645,8 +7119,19 @@ class ApexAI:
         self._scene_items = []
         anims = self.SCENE_ANIMS.get(self._viz_circuit, [])
 
+        # Counts were tuned against a small canvas.  On a maximised window
+        # the same handful of particles is spread over four times the area,
+        # so weather stops reading as weather: twelve rain streaks across
+        # 1300 px look like scratches on the screen.  Scale with area, and
+        # only for the atmospherics that are meant to form a field - one
+        # kangaroo is a joke, eight is a stampede.
+        FIELD = {"rain", "star", "firefly", "confetti", "snow", "sparkle_water",
+                 "blossom", "leaf", "petal", "dust", "ember", "sand"}
+        density = min(3.0, max(1.0, (cw * ch) / (900.0 * 620.0)))
+
         for atype, count in anims:
-            for _ in range(count):
+            n = int(round(count * density)) if atype in FIELD else count
+            for _ in range(n):
                 x = _rng.uniform(40, cw - 40)
                 y = _rng.uniform(40, ch - 40)
 
@@ -6721,12 +7206,19 @@ class ApexAI:
                 elif atype == "rain":
                     x = _rng.uniform(0, cw)
                     y = _rng.uniform(-20, ch)
-                    drop = canvas.create_line(x, y, x - 1, y + 8,
-                                               fill="#4488aa", width=1)
+                    # Depth: near drops are longer, paler and faster; far
+                    # ones are short and dim.  A single uniform streak
+                    # length is what made this read as scratches.
+                    depth = _rng.random()
+                    length = 6 + depth * 11
+                    shade = ("#2c4a5c", "#3d6a86", "#5b93b3")[int(depth * 3)]
+                    drop = canvas.create_line(x, y, x - length * 0.22,
+                                              y + length,
+                                              fill=shade, width=1)
                     self._scene_items.append({
                         "type": "rain", "id": drop,
-                        "x": x, "y": y,
-                        "speed": _rng.uniform(3, 6),
+                        "x": x, "y": y, "len": length,
+                        "speed": 3 + depth * 5,
                         "cw": cw, "ch": ch,
                     })
 
@@ -6838,6 +7330,32 @@ class ApexAI:
                         "#7a9a3a", "#a04a18",
                     ])
                     size = _rng.uniform(3, 5)
+                    # A 3-5 px oval that stretches horizontally was meant to
+                    # read as a leaf flipping over; at that size it is just a
+                    # coloured dot hanging in the air.  Reuse the tumbling
+                    # maple sprite, which already exists for Montreal, tinted
+                    # to the autumn colour picked above.
+                    frames = (_maple_leaf_rotation_frames(
+                        int(size * 3.4), 6, color=self._hex_rgb(color) + (235,))
+                        if HAS_PIL else None)
+                    if frames:
+                        tk_frames = [ImageTk.PhotoImage(f) for f in frames]
+                        self._tk_images.extend(tk_frames)
+                        leaf = canvas.create_image(lx, ly,
+                                                   image=tk_frames[0],
+                                                   anchor="center")
+                        self._scene_items.append({
+                            "type": "maple", "id": leaf,
+                            "x": lx, "y": ly,
+                            "vx": _rng.uniform(-0.4, 0.4),
+                            "vy": _rng.uniform(0.5, 1.0),
+                            "sway": _rng.uniform(0, 6.28),
+                            "rot_speed": _rng.uniform(0.05, 0.13),
+                            "rot_phase": _rng.uniform(0, 6.28),
+                            "frames": tk_frames,
+                            "cw": cw, "ch": ch,
+                        })
+                        continue
                     leaf = canvas.create_oval(
                         lx - size, ly - size * 0.55,
                         lx + size, ly + size * 0.55,
@@ -7059,8 +7577,9 @@ class ApexAI:
                 if item["y"] > item["ch"]:
                     item["y"] = -10
                     item["x"] = self._rng.uniform(0, item["cw"])
+                ln = item.get("len", 8)
                 coords(item["id"], item["x"], item["y"],
-                       item["x"] - 1, item["y"] + 8)
+                       item["x"] - ln * 0.22, item["y"] + ln)
 
             elif t == "sparkle_water":
                 brightness = abs(sin(item["phase"] + frame * item["speed"]))
@@ -7166,7 +7685,12 @@ class ApexAI:
     # canvas items per frame ends up feeling more labored than 30 fps with
     # consistent pacing.  Combined with absolute-time scheduling (see below)
     # this gives a much smoother perceived motion.
-    _FRAME_INTERVAL_MS = 33
+    # 60 fps.  The map used to run at 30 because the track was ~400 canvas
+    # items that Tk re-rasterised on every dirty rect; now it is one image
+    # and the per-frame work is just repositioning ~20 sprites, so the
+    # higher rate is affordable and the motion is visibly smoother.  All
+    # motion is wall-clock driven, so the rate does not change the speed.
+    _FRAME_INTERVAL_MS = 16
     # Driver labels follow their cars at ~10 fps (every 3rd frame at the
     # 30 fps base).  We *stagger* across drivers (`(frame + i) % N`) so
     # only ~2-3 of the 8 cards refresh in any single tick; this keeps the
@@ -7224,6 +7748,9 @@ class ApexAI:
         if trails_shown is None:
             trails_shown = [False] * n
             self._trails_shown = trails_shown
+        # Resolved once per frame rather than per driver: image items take
+        # (x, y), oval items take a bbox, and the branch is hot.
+        sprite_dots = getattr(self, "_dots_are_sprites", False)
 
         for i in range(n):
             target = self._anim_targets[i]
@@ -7240,8 +7767,12 @@ class ApexAI:
             px, py = pos_at(pos)
             dot_r = 8 if i == 0 else 6 if i < 3 else 4
 
-            coords(dot_ids[i],
-                   px - dot_r, py - dot_r, px + dot_r, py + dot_r)
+            # Sprites are centre-anchored images: two coords, not a bbox.
+            if sprite_dots:
+                coords(dot_ids[i], px, py)
+            else:
+                coords(dot_ids[i],
+                       px - dot_r, py - dot_r, px + dot_r, py + dot_r)
             coords(txt_ids[i], px, py)
 
             trails = trail_ids[i]
@@ -7256,15 +7787,25 @@ class ApexAI:
                 for t_idx in range(0, len(trails), 2):
                     tr_r = trails[t_idx]
                     tr_id = trails[t_idx + 1]
-                    trail_pos = (pos - (t_idx // 2 + 1) * 2.5) % num
+                    trail_pos = (pos - (t_idx // 2 + 1) * 2.0) % num
                     tx, ty = pos_at(trail_pos)
-                    coords(tr_id, tx - tr_r, ty - tr_r, tx + tr_r, ty + tr_r)
+                    if sprite_dots:
+                        coords(tr_id, tx, ty)
+                    else:
+                        coords(tr_id, tx - tr_r, ty - tr_r,
+                               tx + tr_r, ty + tr_r)
 
             if i == 0 and in_orbit:
-                pulse = 0.5 + 0.5 * math.sin(t_total * 3.75)
-                glow_r = 14 + pulse * 6
-                coords(self._glow_id,
-                       px - glow_r, py - glow_r, px + glow_r, py + glow_r)
+                if self._glow_is_sprite:
+                    # The sprite carries its own falloff, so the pulse rides
+                    # on position only; resizing an image per frame would
+                    # mean re-rasterising it 60 times a second.
+                    coords(self._glow_id, px, py)
+                else:
+                    pulse = 0.5 + 0.5 * math.sin(t_total * 3.75)
+                    glow_r = 14 + pulse * 6
+                    coords(self._glow_id,
+                           px - glow_r, py - glow_r, px + glow_r, py + glow_r)
                 if not getattr(self, "_glow_shown", False):
                     itemcfg(self._glow_id, state="normal")
                     self._glow_shown = True

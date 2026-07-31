@@ -169,8 +169,22 @@ need to follow the race.
 
 ### 6.3 Race Visualization
 
-- **F3.1.** Animated 30 fps track-map canvas with one dot per driver,
-  trailing motion blur, and per-driver team colour.
+- **F3.1.** Animated 60 fps track-map canvas with one dot per driver,
+  a fading trail, and per-driver team colour.
+  - **F3.1a.** Tk's canvas has no anti-aliasing, so the circuit, its
+    outer glow, the track-limit lines and the red/white kerbs are drawn
+    into a single supersampled PIL image (2x, BOX downsample) and blitted
+    as one item. Cars, their trails and the leader glow are pre-rendered
+    sprites rather than `create_oval`, which also lets a trail fade with
+    real alpha instead of Tk's 25 % `stipple` checkerboard.
+  - **F3.1b.** The item-count collapse that follows is what makes 60 fps
+    affordable: per frame the loop repositions ~20 sprites instead of Tk
+    re-rasterising a 200-vertex ribbon on every dirty rect. All motion is
+    wall-clock driven, so the frame rate does not change playback speed.
+  - **F3.1c.** Scene build cost is held to ~2 s (it was 9.3 s when the
+    passes were first written at 3x/LANCZOS): the ribbon downsamples with
+    BOX, the blurred grass verge is built at half resolution, and the
+    soft glow strokes use half the point density.
 - **F3.2.** **MOM zones** highlighted on the two longest detected
   straights (cross-product curvature analysis with progressive
   separation fallback so single-straight tracks like Imola still get a
@@ -182,6 +196,20 @@ need to follow the race.
   - Las Vegas / Mexico / Interlagos: confetti
   - Silverstone, Spa: rain
   - Desert circuits: starlit night sky
+- **F3.3a.** **Scenery must clear the racing surface.** Trees, cacti and
+  grandstands are positioned by stepping along the centreline and pushing
+  out along the local normal, which only accounts for the segment it
+  started from. Anywhere the lap runs back beside itself that lands on
+  another part of the circuit, which put trees on the asphalt at Spa and
+  Suzuka. Placements are now tested against a grid-indexed copy of the
+  whole centreline and rejected if they fall within ~2 track widths.
+- **F3.3b.** **Backdrop.** A vertical sky wash with a smooth radial
+  vignette, a soft-edged grass band under the circuit, and a two-layer
+  ridge silhouette on the skyline that fades out at its base. The ridge
+  was previously anchored so its peaks were clipped off the top of the
+  canvas, and both ridges are now painted lighter than the background so
+  they read as silhouettes rather than vanishing and leaving their snow
+  caps floating.
 - **F3.4.** **Real circuit silhouettes** — each track is hand-traced
   in `track_layouts.py` (Suzuka figure-8, Baku L-shape, Spa triangle,
   etc.) and rendered with aspect-preserving fit + dynamic padding so
@@ -377,7 +405,7 @@ screen does not need is deferred:
 | **Warm start (cache hits)** | ≤ 5 s to a visible, populated console (measured ~5.0 – 5.9 s; was ~8.3 – 9.8 s before the launch-path deferrals of 6.9) |
 | **Predict next race (warm)** | ≤ 30 s total; the first click after launch also pays a one-off ~3 s model warm-up on a worker thread |
 | **Backtest 96 races** | ≤ 60 s on a multi-core Mac (~28 s). Not met on Windows — measured ≈ 70 s *per race*; see F2.4 |
-| **Visualization frame rate** | 30 fps sustained on M-series Macs |
+| **Visualization frame rate** | 60 fps sustained (was 30; the map is now ~30 canvas items rather than several hundred) |
 | **Replays tab open** | ≤ 200 ms perceived latency |
 | **Telemetry comparison (session cached)** | ≤ 3 s from *Compare Laps* to rendered traces |
 | **Session replay build (first time)** | ≤ 90 s for a race, dominated by the telemetry download |
