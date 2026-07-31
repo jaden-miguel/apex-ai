@@ -114,9 +114,16 @@ two lap times; see the alignment notes below.*
     (most of Spa, Suzuka's crossover) that put trees on the racing
     surface. Every placement now tests against a spatial index of the
     whole lap. The trees themselves are anti-aliased sprites with
-    contact shadows, the skyline is a two-layer ridge that fades into
-    the sky rather than a row of clipped triangles, and the grass verge
-    is a soft-edged band instead of a hard Tk outline.
+    contact shadows and three canopy variants so a treeline doesn't read
+    as one stencil repeated, the skyline is a two-layer ridge that fades
+    into the sky rather than a row of clipped triangles, and the grass is
+    a soft-edged band mottled with two octaves of value noise.
+  - **Trackside furniture.** Gravel run-off is laid on the *outside* of
+    every corner (from signed curvature, so it lands where a car running
+    wide would actually go), backed by staggered rows of tyre barriers.
+    Grandstands carry per-tier crowd speckle and a roof lip instead of
+    being four flat grey bands. All of it bakes into the static backdrop,
+    so the detail costs nothing per frame.
   - **Singleton enforcement**: launching `app.py` while another
     instance is open kills the prior PID (with `SIGKILL` fallback) and
     sweeps the OS process list so stale instances from terminals or

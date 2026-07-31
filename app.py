@@ -5726,6 +5726,30 @@ class ApexAI:
         for grow, alpha in ((9, 34), (4, 60)):
             stroke(tw + grow, (12, 12, 20, alpha), coarse)
 
+        # ── Run-off on the outside of corners ──
+        # Gravel traps are the single most recognisable piece of trackside
+        # furniture from above, and they only appear where a car would
+        # actually run wide, so they double as a read on where the corners
+        # are.  Painted under the asphalt so the track edge stays crisp.
+        corners = self._corner_outsides(track)
+        n_pts = len(track)
+        for i, side in corners:
+            j = (i + 4) % n_pts
+            nx, ny = self._track_normal(track, i)
+            mx, my = self._track_normal(track, j)
+            inner_a = (track[i][0] + nx * hw * side,
+                       track[i][1] + ny * hw * side)
+            inner_b = (track[j][0] + mx * hw * side,
+                       track[j][1] + my * hw * side)
+            reach = hw * 2.3
+            outer_b = (track[j][0] + mx * reach * side,
+                       track[j][1] + my * reach * side)
+            outer_a = (track[i][0] + nx * reach * side,
+                       track[i][1] + ny * reach * side)
+            d.polygon([(p[0] * s, p[1] * s) for p in
+                       (inner_a, inner_b, outer_b, outer_a)],
+                      fill=(58, 49, 36, 190))
+
         stroke(tw + 2, (22, 22, 30, 255))       # kerb apron / verge
         stroke(tw, (17, 17, 25, 255))           # asphalt
         stroke(max(2, tw * 0.55), (23, 23, 33, 255))   # camber highlight
@@ -5758,7 +5782,56 @@ class ApexAI:
                      (track[j][1] + my * hw * side) * s)
                 d.line([a, b], fill=colour, width=max(1, int(kerb_w * s)))
 
+        # ── Tyre barriers ──
+        # A wall of stacked tyres at the far edge of each run-off.  Drawn as
+        # a row of individual dark discs with a lighter rim rather than one
+        # thick line, because the repetition is what makes it legible as a
+        # barrier at this scale.
+        tyre_r = max(1.2, hw * 0.17)
+        for n, (i, side) in enumerate(corners):
+            if i % 2:
+                continue
+            nx, ny = self._track_normal(track, i)
+            bx = track[i][0] + nx * hw * 2.45 * side
+            by = track[i][1] + ny * hw * 2.45 * side
+            # Two staggered rows, as they are stacked in reality.
+            for row, jitter in ((0.0, 0.0), (1.0, 0.55)):
+                px = (bx + nx * tyre_r * 1.7 * row * side) * s
+                py = (by + ny * tyre_r * 1.7 * row * side) * s
+                # Offset along the track direction for the stagger.
+                tx, ty = -ny, nx
+                px += tx * tyre_r * jitter * s
+                py += ty * tyre_r * jitter * s
+                r = tyre_r * s
+                d.ellipse([px - r, py - r, px + r, py + r],
+                          fill=(26, 26, 30, 255),
+                          outline=(74, 74, 84, 255),
+                          width=max(1, int(0.5 * s)))
+
         return img.resize((int(cw), int(ch)), Image.BOX)
+
+    @staticmethod
+    def _corner_outsides(track, step=5, keep=0.30):
+        """Return [(index, side)] for the tightest corners.
+
+        `side` is +1/-1 matching `_track_normal`, pointing away from the
+        curve, i.e. the direction a car running wide would leave the track.
+        That is where run-off and barriers belong; putting them on the
+        inside would look like a parking lot in the middle of a hairpin.
+        """
+        n = len(track)
+        if n < 3 * step:
+            return []
+        signed = []
+        for i in range(n):
+            ax, ay = track[(i - step) % n]
+            bx, by = track[i]
+            cx2, cy2 = track[(i + step) % n]
+            cross = (bx - ax) * (cy2 - by) - (by - ay) * (cx2 - bx)
+            signed.append((abs(cross), -1 if cross > 0 else 1, i))
+        signed.sort(reverse=True)
+        cutoff = max(1, int(n * keep))
+        return [(i, side) for _mag, side, i in signed[:cutoff]]
 
     def _interpolate_track(self, raw_pts, num_out=400):
         n = len(raw_pts)
@@ -6047,8 +6120,8 @@ class ApexAI:
                         return False
         return True
 
-    def _tree_sprite(self, kind, color, height):
-        """Anti-aliased tree, memoised per (kind, colour, height).
+    def _tree_sprite(self, kind, color, height, variant=0):
+        """Anti-aliased tree, memoised per (kind, colour, height, variant).
 
         The vector versions were a couple of Tk triangles and a hard-edged
         oval, which at this scale read as a green tick rather than a tree.
@@ -6058,7 +6131,8 @@ class ApexAI:
         if not HAS_PIL:
             return None
         h = max(10, int(height))
-        key = ("tree", kind, color, h)
+        variant = int(variant) % 3
+        key = ("tree", kind, color, h, variant)
         if key in self._icon_cache:
             return self._icon_cache[key]
 
@@ -6080,10 +6154,12 @@ class ApexAI:
             trunk = max(1, int(w * ss * 0.07))
             d.line([(cx, base), (cx, base - h * ss * 0.28)],
                    fill=(42, 26, 10, 255), width=trunk)
-            # Three stacked skirts, widest at the bottom.
-            for frac_y, frac_w, fill in ((0.26, 0.46, dark),
-                                         (0.50, 0.37, rgb),
-                                         (0.74, 0.26, lit)):
+            # Three stacked skirts, widest at the bottom; variant tweaks
+            # how squat or spindly the tree is.
+            spread = (1.0, 0.86, 1.13)[variant]
+            for frac_y, frac_w, fill in ((0.26, 0.46 * spread, dark),
+                                         (0.50, 0.37 * spread, rgb),
+                                         (0.74, 0.26 * spread, lit)):
                 by = base - h * ss * frac_y
                 d.polygon([(cx - w * ss * frac_w, by),
                            (cx, by - h * ss * 0.34),
@@ -6109,10 +6185,18 @@ class ApexAI:
             d.line([(cx, base), (cx, base - h * ss * 0.42)],
                    fill=(42, 26, 10, 255), width=trunk)
             r = w * ss * 0.30
-            for ox, oy, rr, fill in ((-0.20, 0.52, 0.92, dark),
-                                     (0.20, 0.55, 0.88, dark),
-                                     (0.00, 0.68, 1.00, rgb),
-                                     (-0.10, 0.74, 0.62, lit)):
+            # Three canopy arrangements, picked by variant.  Identical
+            # crowns repeated down a treeline read as a stencil; nudging
+            # the blobs is enough to break that up at this size.
+            crowns = (
+                ((-0.20, 0.52, 0.92, dark), (0.20, 0.55, 0.88, dark),
+                 (0.00, 0.68, 1.00, rgb), (-0.10, 0.74, 0.62, lit)),
+                ((-0.24, 0.58, 0.80, dark), (0.18, 0.50, 0.95, dark),
+                 (0.02, 0.72, 0.92, rgb), (0.12, 0.78, 0.55, lit)),
+                ((-0.16, 0.49, 0.98, dark), (0.24, 0.62, 0.78, dark),
+                 (-0.02, 0.64, 1.05, rgb), (-0.14, 0.70, 0.58, lit)),
+            )[variant]
+            for ox, oy, rr, fill in crowns:
                 px = cx + w * ss * ox
                 py = base - h * ss * oy
                 d.ellipse([px - r * rr, py - r * rr, px + r * rr, py + r * rr],
@@ -6131,9 +6215,10 @@ class ApexAI:
         self._icon_cache[key] = photo
         return photo
 
-    def _s_tree(self, c, x, y, s, kind, color):
+    def _s_tree(self, c, x, y, s, kind, color, variant=0):
         sprite = self._tree_sprite(kind, color,
-                                   28 * s if kind == "palm" else 22 * s)
+                                   28 * s if kind == "palm" else 22 * s,
+                                   variant)
         if sprite is not None:
             # Anchor south so the trunk meets the ground point.
             c.create_image(x, y, image=sprite, anchor="s")
@@ -6189,7 +6274,8 @@ class ApexAI:
                 ty = track[i][1] + ny * dist * side
                 if not self._clear_of_track(tx, ty, min_clear):
                     continue
-                self._s_tree(c, tx, ty, tree_s, kind, color)
+                self._s_tree(c, tx, ty, tree_s, kind, color,
+                             variant=(i // spacing) + (0 if side > 0 else 1))
 
     def _s_grandstand_at(self, c, track, hw, frac, side, s):
         num = len(track)
@@ -6213,6 +6299,37 @@ class ApexAI:
                 gray = 0x14 + row * 4
                 c.create_polygon(pts, fill=f"#{gray:02x}{gray:02x}{gray + 8:02x}",
                                  outline="#222230")
+
+            # Crowd: a speckle of tiny warm dots along each tier.  Four
+            # flat grey bands read as a car park from above; the speckle is
+            # what makes it a full grandstand.  Deterministic offsets keep
+            # it stable across the resize rebuilds.
+            seat_d = (inner_d + outer_d) / 2
+            for k, j in enumerate(range(-span // 2, span // 2 + 1)):
+                if (j + row) % 2:
+                    continue
+                idx = (base + j) % num
+                nx, ny = self._track_normal(track, idx)
+                jitter = ((idx * 17 + row * 7) % 5 - 2) * 0.4 * s
+                sx = track[idx][0] + nx * (seat_d + jitter) * side
+                sy = track[idx][1] + ny * (seat_d + jitter) * side
+                tone = ("#6b6b7a", "#8a7f72", "#57606e",
+                        "#7d6f63")[(idx + row) % 4]
+                r = max(0.6, 0.9 * s)
+                c.create_oval(sx - r, sy - r, sx + r, sy + r,
+                              fill=tone, outline="")
+
+        # Roof lip along the back of the stand, so it has a silhouette
+        # rather than just being flat tiers.
+        roof = []
+        back_d = hw * 2.4 + 4 * 5 * s + 4 * s
+        for j in range(-span // 2, span // 2 + 1, 2):
+            idx = (base + j) % num
+            nx, ny = self._track_normal(track, idx)
+            roof.extend([track[idx][0] + nx * back_d * side,
+                         track[idx][1] + ny * back_d * side])
+        if len(roof) >= 4:
+            c.create_line(roof, fill="#3a3a48", width=max(1, 2 * s))
 
     def _s_water_edge(self, c, cw, ch, side, s):
         # The water edge used to paint a dark-blue rectangle (and ripple

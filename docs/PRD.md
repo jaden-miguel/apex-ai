@@ -212,8 +212,22 @@ need to follow the race.
   Suzuka. Placements are now tested against a grid-indexed copy of the
   whole centreline and rejected if they fall within ~2 track widths.
 - **F3.3b.** **Backdrop.** A vertical sky wash with a smooth radial
-  vignette, a soft-edged grass band under the circuit, and a two-layer
-  ridge silhouette on the skyline that fades out at its base. The ridge
+  vignette, a grass band under the circuit mottled with two octaves of
+  blurred value noise, and a two-layer ridge silhouette on the skyline
+  that fades out at its base.
+- **F3.3c.** **Trackside furniture**, all baked into the static backdrop
+  so it is free at frame time:
+  - **Gravel run-off** on the outside of every corner. The side comes
+    from the *signed* cross product of consecutive segment vectors, so it
+    lands where a car running wide would go; using the unsigned magnitude
+    would put it on the apex.
+  - **Tyre barriers** at the far edge of each run-off, drawn as two
+    staggered rows of individual discs rather than one thick line,
+    because the repetition is what makes them legible at map scale.
+  - **Grandstands** with per-tier crowd speckle in four warm tones and a
+    roof lip, instead of four flat grey polygons.
+  - **Three canopy variants** per tree species, selected from the
+    placement index, so a treeline is a wood rather than one stencil. The ridge
   was previously anchored so its peaks were clipped off the top of the
   canvas, and both ridges are now painted lighter than the background so
   they read as silhouettes rather than vanishing and leaving their snow
