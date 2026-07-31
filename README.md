@@ -86,7 +86,7 @@ two lap times; see the alignment notes below.*
     the original numbered keys rather than to bare words.
   - **Home button:** the F1 logo + "ApexAI" wordmark in the header
     return you to the last predicted race from anywhere in the app.
-  - **60 fps animated track-map visualisation** with per-driver dots,
+  - **Animated track-map visualisation** with per-driver dots,
     automatic MOM (Maximum Overtake Moment) zone detection on the
     longest straights, hand-traced real circuit silhouettes, and a
     podium card featuring procedural anti-aliased gold / silver /
@@ -94,10 +94,14 @@ two lap times; see the alignment notes below.*
   - **Anti-aliased circuit rendering.** Tk's canvas cannot anti-alias, so
     the track used to stair-step around every corner. The surface, its
     outer glow, the track-limit lines and the red/white kerbs are now
-    drawn into one supersampled PIL image, and the cars are pre-rendered
-    sprites rather than `create_oval`. That also collapses the map from
-    several hundred canvas items to a few dozen, which is what pays for
-    the jump from 30 to 60 fps.
+    drawn into one supersampled PIL image, the cars are pre-rendered
+    sprites rather than `create_oval`, and the sky, grass, skyline and
+    circuit are flattened into a single opaque backdrop image. The frame
+    rate is bounded by Tk's software canvas redraw, not by the tick: the
+    tick costs ~3 ms (it would sustain 300 fps) while a redraw costs
+    ~60 ms, because the cars are scattered across the whole map so the
+    dirty region is effectively the entire canvas. Measured ~15 fps on a
+    1300x900 canvas, which is what the pre-sprite build did too.
   - **Per-race ambient theming:** sakura petals at Suzuka, maple leaves
     at Montréal, Mediterranean sun over Monaco, carnival confetti at
     Interlagos and Mexico City, neon + fireworks on the Vegas Strip,

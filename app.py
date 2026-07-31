@@ -5758,8 +5758,7 @@ class ApexAI:
                      (track[j][1] + my * hw * side) * s)
                 d.line([a, b], fill=colour, width=max(1, int(kerb_w * s)))
 
-        img = img.resize((int(cw), int(ch)), Image.BOX)
-        return ImageTk.PhotoImage(img)
+        return img.resize((int(cw), int(ch)), Image.BOX)
 
     def _interpolate_track(self, raw_pts, num_out=400):
         n = len(raw_pts)
@@ -5843,16 +5842,18 @@ class ApexAI:
         # flat fills before: the canvas was one colour and the verge was a
         # hard-edged Tk polygon whose outline stair-stepped around every
         # corner and stopped dead at its own border.
-        sky = self._render_sky(cw, ch)
-        if sky is not None:
-            self._tk_images.append(sky)
-            canvas.create_image(0, 0, image=sky, anchor="nw")
+        # Accumulated in PIL rather than placed as separate canvas images.
+        # Three stacked full-canvas RGBA items meant every moving car forced
+        # Tk to re-composite three alpha layers inside its dirty rect, which
+        # dropped the map to ~7 fps.  `_draw_real_track` composites the track
+        # ribbon onto this and lays down a *single opaque* image instead.
+        self._viz_backdrop = self._render_sky(cw, ch)
+        backdrop = self._viz_backdrop
 
         verge = self._render_ground_verge(cw, ch, track, hw, ground_color)
-        if verge is not None:
-            self._tk_images.append(verge)
-            canvas.create_image(0, 0, image=verge, anchor="nw")
-        else:
+        if backdrop is not None and verge is not None:
+            backdrop.alpha_composite(verge)
+        elif verge is None and backdrop is None:
             flat = []
             for p in track:
                 flat.extend(p)
@@ -5950,7 +5951,7 @@ class ApexAI:
         dark = Image.new("RGBA", (w, h), (0, 0, 0, 255))
         dark.putalpha(vig)
         img.alpha_composite(dark)
-        return ImageTk.PhotoImage(img)
+        return img
 
     def _render_ground_verge(self, cw, ch, track, hw, ground_color):
         """Soft-edged grass band the circuit is laid on.
@@ -5981,10 +5982,34 @@ class ApexAI:
         mask = mask.filter(ImageFilter.GaussianBlur(radius=hw * 0.55 * half))
         mask = mask.resize((int(cw), int(ch)), Image.BILINEAR)
 
-        band = Image.new("RGBA", (int(cw), int(ch)),
-                         self._hex_rgb(ground_color) + (255,))
+        # Mottled grass rather than one flat colour.  Value noise, blurred,
+        # gives soft patches of lighter and darker turf; a flat fill over
+        # this area reads as a printed shape.  This is baked into the
+        # static backdrop, so the detail is free at frame time.
+        w, h = int(cw), int(ch)
+        base = np.array(self._hex_rgb(ground_color), dtype=np.float32)
+        rng = np.random.default_rng(7)
+        # Two octaves: broad patches plus a finer break-up.
+        coarse = rng.random((max(2, h // 26), max(2, w // 26))).astype(np.float32)
+        fine = rng.random((max(2, h // 9), max(2, w // 9))).astype(np.float32)
+        coarse_img = Image.fromarray((coarse * 255).astype(np.uint8)).resize(
+            (w, h), Image.BICUBIC)
+        fine_img = Image.fromarray((fine * 255).astype(np.uint8)).resize(
+            (w, h), Image.BICUBIC)
+        noise = (np.asarray(coarse_img, dtype=np.float32) * 0.68 +
+                 np.asarray(fine_img, dtype=np.float32) * 0.32)
+        noise = (noise / 255.0 - 0.5)
+
+        # Keep it to a handful of levels either side of the scene colour.
+        # These are night scenes; anything stronger stops being turf and
+        # becomes a lurid green ring drawn around the circuit.  Green moves
+        # most, so the variation reads as vegetation rather than as noise.
+        swing = noise[..., None] * 13.0 * np.array([0.6, 1.0, 0.5], np.float32)
+        rgb = np.clip(base + swing, 0, 255).astype(np.uint8)
+
+        band = Image.fromarray(rgb, mode="RGB").convert("RGBA")
         band.putalpha(mask)
-        return ImageTk.PhotoImage(band)
+        return band
 
     def _build_track_clearance(self, track, hw):
         """Bucket the circuit into a coarse grid for fast proximity tests.
@@ -6284,6 +6309,12 @@ class ApexAI:
                 img.alpha_composite(cap_layer)
 
         img = img.resize((int(cw), int(span)), Image.BOX)
+        backdrop = getattr(self, "_viz_backdrop", None)
+        if backdrop is not None:
+            # Fold into the shared backdrop rather than adding another
+            # canvas layer for the cars to re-composite every frame.
+            backdrop.alpha_composite(img, (0, max(0, int(horizon - span))))
+            return
         photo = ImageTk.PhotoImage(img)
         self._tk_images.append(photo)
         c.create_image(0, horizon, image=photo, anchor="sw")
@@ -6597,10 +6628,26 @@ class ApexAI:
         # image, which is what makes the 60 fps loop below affordable.
         kerb_idx = [i for i, c in enumerate(curvatures) if c >= curv_top]
         ribbon = self._render_track_ribbon(cw, ch, track, hw, tw, kerb_idx)
-        if ribbon is not None:
-            self._viz_ribbon_tk = ribbon
-            self._tk_images.append(ribbon)
-            canvas.create_image(0, 0, image=ribbon, anchor="nw")
+        backdrop = getattr(self, "_viz_backdrop", None)
+        if ribbon is not None and backdrop is not None:
+            # Sky, vignette, grass, skyline and circuit all flattened into
+            # one *opaque* image, lowered beneath the scenery.  Opaque
+            # matters: Tk then has no alpha to blend when a car's dirty rect
+            # overlaps it, which is the difference between ~7 fps and a
+            # smooth 60.  The trees drawn above it never overlap the track,
+            # so nothing is lost by putting the circuit into the same layer.
+            backdrop.alpha_composite(ribbon)
+            flat_bg = ImageTk.PhotoImage(backdrop.convert("RGB"))
+            self._viz_ribbon_tk = flat_bg
+            self._tk_images.append(flat_bg)
+            bg_id = canvas.create_image(0, 0, image=flat_bg, anchor="nw")
+            canvas.tag_lower(bg_id)
+            self._viz_backdrop = None
+        elif ribbon is not None:
+            photo = ImageTk.PhotoImage(ribbon)
+            self._viz_ribbon_tk = photo
+            self._tk_images.append(photo)
+            canvas.create_image(0, 0, image=photo, anchor="nw")
         else:
             # No Pillow: fall back to the original flat canvas polygons.
             flat = []
@@ -6950,11 +6997,20 @@ class ApexAI:
         self._label_ids = []
         self._label_visible = [False] * n
 
-        # Leader glow: a pre-rendered radial sprite rather than a stroked
-        # oval, so the pulse below fades rather than flickering an outline.
-        self._glow_sprite = self._dot_sprite(GOLD_GLOW, 8, glow=True)
+        # Leader glow: pre-rendered radial sprites rather than a stroked
+        # oval, so the pulse breathes in and out instead of flickering an
+        # outline.  A ladder of sizes is baked once and the tick swaps
+        # between them -- re-rasterising a gradient 60 times a second to
+        # animate the radius would be absurd.
+        self._glow_frames = [
+            self._dot_sprite(GOLD_GLOW, r, glow=True)
+            for r in (7, 8, 9, 10, 11, 12)
+        ]
+        self._glow_frames = [f for f in self._glow_frames if f is not None]
+        self._tk_images.extend(self._glow_frames)
+        self._glow_frame_idx = -1
+        self._glow_sprite = self._glow_frames[0] if self._glow_frames else None
         if self._glow_sprite is not None:
-            self._tk_images.append(self._glow_sprite)
             self._glow_id = canvas.create_image(0, 0, image=self._glow_sprite,
                                                 anchor="center",
                                                 state="hidden")
@@ -7353,6 +7409,8 @@ class ApexAI:
                             "rot_speed": _rng.uniform(0.05, 0.13),
                             "rot_phase": _rng.uniform(0, 6.28),
                             "frames": tk_frames,
+                            "frame_count": len(tk_frames),
+                            "cur_frame": 0,
                             "cw": cw, "ch": ch,
                         })
                         continue
@@ -7685,12 +7743,18 @@ class ApexAI:
     # canvas items per frame ends up feeling more labored than 30 fps with
     # consistent pacing.  Combined with absolute-time scheduling (see below)
     # this gives a much smoother perceived motion.
-    # 60 fps.  The map used to run at 30 because the track was ~400 canvas
-    # items that Tk re-rasterised on every dirty rect; now it is one image
-    # and the per-frame work is just repositioning ~20 sprites, so the
-    # higher rate is affordable and the motion is visibly smoother.  All
-    # motion is wall-clock driven, so the rate does not change the speed.
-    _FRAME_INTERVAL_MS = 16
+    # Frame target.  Measured on a 1300x900 canvas the tick itself costs
+    # ~3 ms (it would sustain >300 fps), but Tk's own canvas redraw costs
+    # ~60 ms: the cars and their labels are scattered right across the map,
+    # so the dirty region each frame is effectively the whole canvas and Tk
+    # re-blits it in software.  That ceiling is ~15 fps here and it is not
+    # something the Python side can move -- the pre-sprite build measured
+    # the same 16 fps against its nominal 30.
+    #
+    # So this asks for 30 rather than 60: requesting frames Tk cannot draw
+    # only queues ticks it will coalesce anyway, burning CPU for nothing.
+    # Motion is wall-clock driven, so the target never changes the speed.
+    _FRAME_INTERVAL_MS = 33
     # Driver labels follow their cars at ~10 fps (every 3rd frame at the
     # 30 fps base).  We *stagger* across drivers (`(frame + i) % N`) so
     # only ~2-3 of the 8 cards refresh in any single tick; this keeps the
@@ -7797,10 +7861,17 @@ class ApexAI:
 
             if i == 0 and in_orbit:
                 if self._glow_is_sprite:
-                    # The sprite carries its own falloff, so the pulse rides
-                    # on position only; resizing an image per frame would
-                    # mean re-rasterising it 60 times a second.
                     coords(self._glow_id, px, py)
+                    # Breathe through the baked size ladder.  Only reconfigure
+                    # when the rung actually changes, so most frames cost one
+                    # coords call.
+                    frames = self._glow_frames
+                    if frames:
+                        pulse = 0.5 + 0.5 * math.sin(t_total * 3.75)
+                        gi = int(pulse * (len(frames) - 1) + 0.5)
+                        if gi != self._glow_frame_idx:
+                            self._glow_frame_idx = gi
+                            itemcfg(self._glow_id, image=frames[gi])
                 else:
                     pulse = 0.5 + 0.5 * math.sin(t_total * 3.75)
                     glow_r = 14 + pulse * 6
@@ -7843,6 +7914,7 @@ class ApexAI:
                     # Follow the car at a throttled, *staggered* rate.
                     # The offset is the fixed (dx, dy) computed at reveal,
                     # so this is just two adds + five coord calls.
+                    #
                     ox, oy = ids["_offset"]
                     lx = px + ox
                     ly = py + oy
@@ -7859,7 +7931,16 @@ class ApexAI:
         # the on-screen speed matches the legacy version regardless of fps.
         if hasattr(self, "_scene_items") and self._scene_items:
             virtual_frame = t_total * 12.5  # legacy "frames" (1 per 80ms)
-            self._tick_scene_anims(virtual_frame, dt / 0.08)
+            # Ambient scenery must never be able to stop the race.  A single
+            # malformed particle used to raise straight out of the frame
+            # callback, which killed the whole loop and left the cars frozen
+            # on the grid -- the decoration taking the thing it decorates
+            # down with it.  Drop the ambient layer instead and keep going.
+            try:
+                self._tick_scene_anims(virtual_frame, dt / 0.08)
+            except Exception as exc:
+                self._scene_items = []
+                self._set_status(f"Ambient scenery disabled: {exc}")
 
         # Absolute-time scheduling: target the next tick relative to a fixed
         # clock rather than "X ms from when this tick finishes".  If a tick

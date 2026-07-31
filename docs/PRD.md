@@ -169,19 +169,27 @@ need to follow the race.
 
 ### 6.3 Race Visualization
 
-- **F3.1.** Animated 60 fps track-map canvas with one dot per driver,
-  a fading trail, and per-driver team colour.
+- **F3.1.** Animated track-map canvas with one dot per driver, a fading
+  trail, and per-driver team colour.
   - **F3.1a.** Tk's canvas has no anti-aliasing, so the circuit, its
     outer glow, the track-limit lines and the red/white kerbs are drawn
     into a single supersampled PIL image (2x, BOX downsample) and blitted
     as one item. Cars, their trails and the leader glow are pre-rendered
     sprites rather than `create_oval`, which also lets a trail fade with
     real alpha instead of Tk's 25 % `stipple` checkerboard.
-  - **F3.1b.** The item-count collapse that follows is what makes 60 fps
-    affordable: per frame the loop repositions ~20 sprites instead of Tk
-    re-rasterising a 200-vertex ribbon on every dirty rect. All motion is
-    wall-clock driven, so the frame rate does not change playback speed.
-  - **F3.1c.** Scene build cost is held to ~2 s (it was 9.3 s when the
+  - **F3.1b.** Frame rate is bounded by Tk, not by our code. The tick
+    costs ~3 ms; a canvas redraw costs ~60 ms because the cars and their
+    labels are spread across the whole map, so the dirty region is
+    effectively the full canvas and Tk re-blits it in software. ~15 fps
+    at 1300x900, unchanged from the pre-sprite build. The frame target is
+    therefore 30, not 60: asking for frames Tk cannot draw only queues
+    ticks it will coalesce. All motion is wall-clock driven, so the
+    target never changes playback speed.
+  - **F3.1c.** The static layers (sky, vignette, grass, skyline, circuit)
+    are flattened into one **opaque** backdrop image. Three stacked
+    full-canvas RGBA layers had Tk alpha-compositing all of them inside
+    every car's dirty rect, which halved the frame rate to ~7 fps.
+  - **F3.1d.** Scene build cost is held to ~2 s (it was 9.3 s when the
     passes were first written at 3x/LANCZOS): the ribbon downsamples with
     BOX, the blurred grass verge is built at half resolution, and the
     soft glow strokes use half the point density.
@@ -405,7 +413,7 @@ screen does not need is deferred:
 | **Warm start (cache hits)** | ≤ 5 s to a visible, populated console (measured ~5.0 – 5.9 s; was ~8.3 – 9.8 s before the launch-path deferrals of 6.9) |
 | **Predict next race (warm)** | ≤ 30 s total; the first click after launch also pays a one-off ~3 s model warm-up on a worker thread |
 | **Backtest 96 races** | ≤ 60 s on a multi-core Mac (~28 s). Not met on Windows — measured ≈ 70 s *per race*; see F2.4 |
-| **Visualization frame rate** | 60 fps sustained (was 30; the map is now ~30 canvas items rather than several hundred) |
+| **Visualization frame rate** | Bounded by Tk's canvas redraw, not by the tick. Measured ~15 fps at 1300x900 (the pre-sprite build measured the same); the tick itself costs ~3 ms and would sustain >300 fps |
 | **Replays tab open** | ≤ 200 ms perceived latency |
 | **Telemetry comparison (session cached)** | ≤ 3 s from *Compare Laps* to rendered traces |
 | **Session replay build (first time)** | ≤ 90 s for a race, dominated by the telemetry download |
