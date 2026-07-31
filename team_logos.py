@@ -159,7 +159,7 @@ def _remove_baked_background(img: "Image.Image") -> "Image.Image":
     if h < 8 or w < 8:
         return img
 
-    # Opaque fraction — logos with real transparency are left untouched.
+    # Opaque fraction, logos with real transparency are left untouched.
     alpha = arr[..., 3]
     if (alpha > 200).mean() < 0.90:
         return img

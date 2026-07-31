@@ -1,6 +1,6 @@
 """
 Hand-crafted F1 circuit outlines.  Each track is a closed loop of (x, y)
-control points that captures the *real* silhouette of the circuit — the
+control points that captures the *real* silhouette of the circuit, the
 distinctive features that make Suzuka a figure-8, Baku a long sea-front
 ribbon, Spa a triangular Ardennes climb, etc.
 
@@ -16,15 +16,15 @@ Coordinates are interpolated into smooth curves at render time.
 # ---------------------------------------------------------------------------
 # Each circuit below is a closed-loop sequence of (x, y) points traced
 # clockwise.  The sequence does *not* duplicate the start point at the
-# end — `_interpolate_track` closes the loop.
+# end: `_interpolate_track` closes the loop.
 #
-# These shapes are stylised — they're not GPS-accurate, but the
+# These shapes are stylised; they're not GPS-accurate, but the
 # silhouette (number and orientation of major straights, location of
 # the iconic hairpins / chicanes / esses) matches the real layout so
 # each track is unambiguous from a glance.
 # ---------------------------------------------------------------------------
 
-# Albert Park, Melbourne — flat circuit hugging the lake's perimeter.
+# Albert Park, Melbourne, flat circuit hugging the lake's perimeter.
 # Iconic features: fast Turn 1 sweep at the north-east, the Lakeside
 # Drive sweep, then the slow south-east chicane and the long Turn 11
 # left-hander coming back along the western side.
@@ -42,7 +42,7 @@ MELBOURNE = [
     (0.14, 0.36),
 ]
 
-# Sakhir, Bahrain — bowtie with the long Turn 4 sweeper, snaking middle
+# Sakhir, Bahrain, bowtie with the long Turn 4 sweeper, snaking middle
 # sector and the slow Turn 8 hairpin halfway round.
 BAHRAIN = [
     (0.18, 0.42), (0.40, 0.42), (0.60, 0.42), (0.78, 0.42),
@@ -54,7 +54,7 @@ BAHRAIN = [
     (0.30, 0.54), (0.22, 0.50),
 ]
 
-# Jeddah Corniche — extremely long, narrow, fast street circuit with a
+# Jeddah Corniche, extremely long, narrow, fast street circuit with a
 # series of high-speed esses along the seafront.
 JEDDAH = [
     (0.05, 0.50), (0.12, 0.46), (0.20, 0.50), (0.28, 0.46),
@@ -66,7 +66,7 @@ JEDDAH = [
     (0.10, 0.58),
 ]
 
-# Suzuka, Japan — the only true figure-8 on the F1 calendar.  The path
+# Suzuka, Japan, the only true figure-8 on the F1 calendar.  The path
 # crosses itself near the centre, mimicking the over-bridge between the
 # Degner curves and the back straight (the two passes are offset along
 # the y axis so the crossover is unambiguous after interpolation).
@@ -89,7 +89,7 @@ SUZUKA = [
     (0.24, 0.14), (0.34, 0.10),
 ]
 
-# Shanghai — the famous "snail" coiled inside a triangle.  The opening
+# Shanghai: the famous "snail" coiled inside a triangle.  The opening
 # turn is a long descending right-hander that wraps almost 360°.
 SHANGHAI = [
     (0.55, 0.10), (0.66, 0.12), (0.76, 0.16), (0.84, 0.22),
@@ -103,7 +103,7 @@ SHANGHAI = [
     (0.46, 0.16),
 ]
 
-# Miami International Autodrome — squared-off ring around the Hard Rock
+# Miami International Autodrome, squared-off ring around the Hard Rock
 # Stadium with chicanes in the middle sector.
 MIAMI = [
     (0.30, 0.12), (0.50, 0.10), (0.70, 0.12), (0.84, 0.18),
@@ -115,7 +115,7 @@ MIAMI = [
     (0.22, 0.20),
 ]
 
-# Imola — long, narrow, north-south circuit with the Variante chicanes
+# Imola: long, narrow, north-south circuit with the Variante chicanes
 # and the Tamburello/Villeneuve curves.
 IMOLA = [
     (0.45, 0.06), (0.55, 0.06), (0.62, 0.10), (0.66, 0.18),
@@ -127,7 +127,7 @@ IMOLA = [
     (0.38, 0.24), (0.40, 0.16), (0.44, 0.10),
 ]
 
-# Monaco — tight street rectangle around the harbour.  Distinctive
+# Monaco: tight street rectangle around the harbour.  Distinctive
 # tunnel curve, swimming-pool chicane and Rascasse hairpin.
 MONACO = [
     (0.20, 0.30), (0.32, 0.28), (0.46, 0.28), (0.60, 0.28),  # main straight to Sainte Devote
@@ -142,7 +142,7 @@ MONACO = [
     (0.12, 0.46), (0.16, 0.38),
 ]
 
-# Barcelona-Catalunya — square-ish with the long sweeper into the
+# Barcelona-Catalunya: square-ish with the long sweeper into the
 # stadium section and the final chicane.
 BARCELONA = [
     (0.30, 0.12), (0.50, 0.10), (0.68, 0.12), (0.80, 0.18),
@@ -154,7 +154,7 @@ BARCELONA = [
     (0.16, 0.46), (0.14, 0.36), (0.16, 0.26), (0.22, 0.18),
 ]
 
-# Circuit Gilles Villeneuve, Montreal — long narrow ribbon on Île
+# Circuit Gilles Villeneuve, Montreal, long narrow ribbon on Île
 # Notre-Dame with the famous "Wall of Champions" chicane near the end.
 MONTREAL = [
     (0.06, 0.30), (0.18, 0.26), (0.34, 0.24), (0.50, 0.24),
@@ -167,7 +167,7 @@ MONTREAL = [
     (0.04, 0.62), (0.02, 0.50), (0.04, 0.40),
 ]
 
-# Hungaroring — twisty, low-speed "Monaco without walls" with a hairpin
+# Hungaroring: twisty, low-speed "Monaco without walls" with a hairpin
 # at Turn 1 and a long sweeping back section.
 HUNGARORING = [
     (0.30, 0.10), (0.46, 0.08), (0.62, 0.12), (0.74, 0.20),
@@ -181,7 +181,7 @@ HUNGARORING = [
     (0.18, 0.30), (0.22, 0.22), (0.26, 0.16),
 ]
 
-# Red Bull Ring, Spielberg — short triangular Alpine circuit.  Three
+# Red Bull Ring, Spielberg, short triangular Alpine circuit.  Three
 # long straights joined by tight hairpins (Niki Lauda, Remus, Würth).
 SPIELBERG = [
     (0.30, 0.20),                                              # S/F bottom-left
@@ -196,7 +196,7 @@ SPIELBERG = [
     (0.16, 0.58), (0.20, 0.46), (0.22, 0.34),                  # main straight back up
 ]
 
-# Silverstone — the classic British circuit with the Loop hairpin at
+# Silverstone: the classic British circuit with the Loop hairpin at
 # Becketts/Maggotts and the long Hangar Straight to Stowe.
 SILVERSTONE = [
     (0.20, 0.30), (0.32, 0.24), (0.46, 0.22), (0.60, 0.26),  # Abbey → Village
@@ -210,7 +210,7 @@ SILVERSTONE = [
     (0.16, 0.42), (0.18, 0.36),
 ]
 
-# Spa-Francorchamps — long Ardennes triangle with Eau Rouge, the Kemmel
+# Spa-Francorchamps: long Ardennes triangle with Eau Rouge, the Kemmel
 # Straight, Pouhon double-left and Bus Stop chicane.
 SPA = [
     (0.30, 0.92), (0.42, 0.94), (0.54, 0.92), (0.62, 0.86),  # La Source hairpin
@@ -224,7 +224,7 @@ SPA = [
     (0.20, 0.90),                                              # Bus Stop chicane
 ]
 
-# Zandvoort — short coastal circuit with the famous banked Hugenholtz
+# Zandvoort: short coastal circuit with the famous banked Hugenholtz
 # hairpin (Turn 3) and the banked final corner.
 ZANDVOORT = [
     (0.30, 0.18), (0.46, 0.14), (0.60, 0.16), (0.72, 0.22),
@@ -236,7 +236,7 @@ ZANDVOORT = [
     (0.20, 0.36), (0.24, 0.26),
 ]
 
-# Monza — the temple of speed.  Distinctive triangle of three long
+# Monza: the temple of speed.  Distinctive triangle of three long
 # straights linked by chicanes, with the iconic sweeping Parabolica
 # closing the lap back onto the main straight.
 MONZA = [
@@ -255,7 +255,7 @@ MONZA = [
     (0.28, 0.66), (0.20, 0.54), (0.14, 0.42), (0.10, 0.32),    # back along pit straight
 ]
 
-# Baku City Circuit — extremely long L-shaped seafront straight with the
+# Baku City Circuit, extremely long L-shaped seafront straight with the
 # tight, twisty old-town castle section.
 BAKU = [
     (0.05, 0.55), (0.20, 0.55), (0.40, 0.55), (0.60, 0.55),
@@ -267,7 +267,7 @@ BAKU = [
     (0.12, 0.66), (0.08, 0.62),
 ]
 
-# Marina Bay, Singapore — angular street rectangle with the Anderson
+# Marina Bay, Singapore, angular street rectangle with the Anderson
 # Bridge twirl and the Marina Bay grandstand corners.
 SINGAPORE = [
     (0.20, 0.20), (0.36, 0.16), (0.54, 0.16), (0.70, 0.20),
@@ -279,7 +279,7 @@ SINGAPORE = [
     (0.14, 0.38), (0.16, 0.30),
 ]
 
-# Circuit of the Americas, Austin — counter-clockwise.  Distinctive
+# Circuit of the Americas, Austin, counter-clockwise.  Distinctive
 # silhouette: the iconic uphill Turn 1 at the west, the snake esses
 # along the top, the long left-hander dipping south to the T11 hairpin,
 # back straight east, and the stadium zigzag returning to S/F.
@@ -297,7 +297,7 @@ AUSTIN = [
     (0.28, 0.58), (0.22, 0.52),                                # return to S/F
 ]
 
-# Mexico City — long pit straight, the wide-sweeping Peraltada at the
+# Mexico City, long pit straight, the wide-sweeping Peraltada at the
 # end, and the distinctive Foro Sol stadium pinch where the track
 # zigzags through the old baseball stadium grandstands.
 MEXICO = [
@@ -316,7 +316,7 @@ MEXICO = [
     (0.12, 0.40), (0.12, 0.28),
 ]
 
-# Interlagos, São Paulo — short anti-clockwise loop with the iconic
+# Interlagos, São Paulo, short anti-clockwise loop with the iconic
 # downhill Senna S, the Descida do Lago and the long uphill back to
 # the start/finish.
 INTERLAGOS = [
@@ -331,7 +331,7 @@ INTERLAGOS = [
     (0.32, 0.30), (0.40, 0.22),
 ]
 
-# Las Vegas Strip Circuit — extremely long thin oval with the iconic
+# Las Vegas Strip Circuit, extremely long thin oval with the iconic
 # Strip straight along the south and the East Harmon back-straight.
 LAS_VEGAS = [
     (0.05, 0.45), (0.20, 0.42), (0.40, 0.40), (0.60, 0.40),
@@ -341,7 +341,7 @@ LAS_VEGAS = [
     (0.10, 0.62), (0.04, 0.56),
 ]
 
-# Lusail, Qatar — long fast sweepers, "the desert Maggotts/Becketts".
+# Lusail, Qatar, long fast sweepers, "the desert Maggotts/Becketts".
 # Distinctive succession of high-speed double-apex curves and a long
 # pit straight along the south.
 LUSAIL = [
@@ -357,7 +357,7 @@ LUSAIL = [
     (0.10, 0.62), (0.10, 0.72),                                # back to S/F
 ]
 
-# Yas Marina, Abu Dhabi — angular layout around the marina with the
+# Yas Marina, Abu Dhabi, angular layout around the marina with the
 # Yas Hotel section.  The track has two long straights joined by a
 # tight north-end hairpin and a wide south-side sweeper.
 YAS_MARINA = [

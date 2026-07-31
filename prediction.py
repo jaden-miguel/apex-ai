@@ -3,7 +3,7 @@ Core prediction logic. Returns structured data for the GUI.
 """
 # Annotations are never evaluated at runtime here, so deferring them lets
 # the sklearn-typed signatures below (`-> Pipeline`) stay readable while
-# sklearn itself is imported lazily — see `_build_pipeline`.
+# sklearn itself is imported lazily; see `_build_pipeline`.
 from __future__ import annotations
 
 import atexit
@@ -31,7 +31,7 @@ import fastf1
 import pandas as pd
 
 # sklearn is deliberately NOT imported here.  It costs ~3.5 s to import
-# and is only needed when a model is actually built or scored — showing
+# and is only needed when a model is actually built or scored, showing
 # the cached predictions on launch never touches it.  The two places that
 # need it (`_build_pipeline` and the holdout scoring inside
 # `run_predictions`) import it locally, which keeps that cost off the
@@ -39,8 +39,8 @@ import pandas as pd
 # classes it needs on its own.
 #
 # `RandomizedSearchCV` / `TimeSeriesSplit` were imported here too but had
-# no remaining call sites — v6 fits a fixed configuration rather than
-# searching — so they are gone rather than moved.
+# no remaining call sites, v6 fits a fixed configuration rather than
+# searching: so they are gone rather than moved.
 
 # Suppress fastf1 verbose logging
 logging.getLogger("fastf1").setLevel(logging.WARNING)
@@ -67,7 +67,7 @@ MODEL_VERSION = "v6_2026_ensemble"
 # call each year is only resolved once, plus a JSON-on-disk fallback so a
 # subsequent launch can hydrate immediately even if the network is slow or
 # flaky.  Stale entries (older than 24 h) are still used as a fallback when
-# a fresh fetch fails — better to reuse yesterday's schedule than spin for
+# a fresh fetch fails, better to reuse yesterday's schedule than spin for
 # 30 s on a dead Ergast endpoint.
 _SCHEDULE_MEM_CACHE: dict = {}
 _SCHEDULE_DISK_CACHE = _BASE / "schedule_cache.json"
@@ -216,7 +216,7 @@ def load_last_result() -> dict | None:
 
     # Note that a re-usable fitted model exists *without* unpickling it.
     # Race cycling (`_advance_and_predict`) needs the model, but launch
-    # does not, and the unpickle is expensive — see `load_cached_model`.
+    # does not, and the unpickle is expensive; see `load_cached_model`.
     result["_has_model"] = (_BASE / "model_cache.pkl").exists()
     return result
 
@@ -232,7 +232,7 @@ def load_cached_model():
     sklearn pipeline whose unpickle drags the whole of sklearn into the
     process (~3.5 s), and a launch that just redisplays the cached
     prediction never needs it.  The first action that actually re-scores
-    a lineup pays that cost instead — off the launch path.
+    a lineup pays that cost instead, off the launch path.
 
     Returns None if there is no cached model or it cannot be read.
     """
@@ -296,7 +296,7 @@ def _list_other_app_pids() -> list[int]:
     or this very script).  Best-effort across platforms; returns []
     if the listing fails for any reason.
 
-    The lockfile alone is not enough — if the user double-clicks the
+    The lockfile alone is not enough, if the user double-clicks the
     bundle, runs `python app.py` from two terminals, or a prior crash
     left a stale lockfile, multiple instances can stack up.  This
     sweeps all of them so the singleton is *actually* enforced.
@@ -576,7 +576,7 @@ def load_data(years=(2022, 2023, 2024, 2025, 2026), progress_callback=None):
                 past = sched[sched["EventDate"].dt.date <= today_date]
                 if not past.empty:
                     # There IS a completed race in the target season that
-                    # the cache hasn't seen yet — refresh.
+                    # the cache hasn't seen yet, refresh.
                     needs_refresh = True
             except Exception:
                 pass
@@ -632,7 +632,7 @@ def load_data(years=(2022, 2023, 2024, 2025, 2026), progress_callback=None):
             rnd_i = int(rnd)
             evt_date = event_dates.get(rnd_i)
             if evt_date and evt_date > today:
-                # Future race — no results to ingest.
+                # Future race, no results to ingest.
                 continue
             if progress_callback:
                 progress_callback(f"Loading {year} round {rnd_i}...")
@@ -667,7 +667,7 @@ def load_data(years=(2022, 2023, 2024, 2025, 2026), progress_callback=None):
     df["DriverPointsBefore"] = df.groupby("DriverNumber")["Points"].cumsum() - df["Points"]
     df["TeamPointsBefore"] = df.groupby("TeamName")["Points"].cumsum() - df["Points"]
     # NOTE: we drop rows without GridPosition / DriverNumber (corrupt data) but
-    # keep rows where Position is NaN — those represent DNFs and carry useful
+    # keep rows where Position is NaN, those represent DNFs and carry useful
     # signal about driver / team reliability.  The Winner target is computed
     # *after* this so DNFs correctly resolve to Winner=0.
     df = df.dropna(subset=["GridPosition", "DriverNumber"])
@@ -695,12 +695,12 @@ def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     # Per-driver rolling stats (using expanding window for cumulative history)
     grp = df.groupby("Abbreviation")
 
-    # Recent average finish position (last 5 races) — lower is better
+    # Recent average finish position (last 5 races): lower is better
     df["RecentAvgPos"] = grp["Position"].transform(
         lambda s: s.shift(1).rolling(5, min_periods=1).mean()
     ).fillna(10.0)
 
-    # Recent average qualifying / grid position (last 5 races) — used as
+    # Recent average qualifying / grid position (last 5 races): used as
     # ExpectedGridPosition when projecting forward, since the real grid slot
     # for an unraced event is obviously unknown.
     df["RecentAvgGrid"] = grp["GridPosition"].transform(
@@ -767,7 +767,7 @@ def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     # Season-to-date championship points (leak-free: excludes the current
     # round entirely).  The existing DriverPointsBefore / TeamPointsBefore
     # are *career* cumulative sums, which mostly encode "is a veteran with
-    # a good career" — the current season's standings are a far sharper
+    # a good career"; the current season's standings are a far sharper
     # signal for who is winning races under *this* year's regulations.
     # ------------------------------------------------------------------
     df["SeasonPointsBefore"] = (
@@ -803,7 +803,7 @@ def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # ------------------------------------------------------------------
     # Momentum: raw points scored over the last 3 races.  Sharper than the
-    # 5/10-race windows above — it spikes immediately when a car upgrade
+    # 5/10-race windows above; it spikes immediately when a car upgrade
     # or form swing lands.
     # ------------------------------------------------------------------
     df["RecentPoints3"] = df.groupby("Abbreviation")["Points"].transform(
@@ -840,7 +840,7 @@ def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Qualifying surprise: grid slot vs the driver's recent grid average.
     # Negative = qualified ahead of their own baseline (fresh upgrade,
-    # circuit suits the car) — a strong short-horizon pace signal.
+    # circuit suits the car): a strong short-horizon pace signal.
     df["GridVsForm"] = (df["GridPosition"] - df["RecentAvgGrid"]).fillna(0.0)
 
     return df
@@ -1073,7 +1073,7 @@ def _attach_field_relative(lineup: pd.DataFrame) -> pd.DataFrame:
 # future re-evaluation) but deliberately excluded from the model input.
 # (Column order matters slightly: max_features subsampling in the trees is
 # order-sensitive, so this list pins the exact configuration that won the
-# ablation — the v5 block with FormRankInField appended.)
+# ablation: the v5 block with FormRankInField appended.)
 FEATURES = [
     "Abbreviation", "TeamName",
     "GridPosition", "DriverNumber",
@@ -1111,12 +1111,12 @@ def _build_pipeline() -> Pipeline:
     Instead of a single gradient-boosted classifier we soft-vote three
     learners with deliberately different biases:
 
-      - ``gbm``  : classic GradientBoosting — shallow trees + shrinkage,
+      - ``gbm``  : classic GradientBoosting, shallow trees + shrinkage,
                    the strongest single model in every backtest so far.
-      - ``hgb``  : HistGradientBoosting — leaf-wise growth with L2
+      - ``hgb``  : HistGradientBoosting, leaf-wise growth with L2
                    regularisation captures different interaction
                    structure than depth-wise GBM.
-      - ``rf``   : RandomForest — bagging decorrelates its errors from
+      - ``rf``   : RandomForest, bagging decorrelates its errors from
                    both boosters and tempers their overconfidence on
                    outlier races (weather, first-lap chaos).
 
@@ -1192,7 +1192,7 @@ def build_model() -> Pipeline:
 
 def build_model_fast() -> Pipeline:
     """Model used per-race by the leave-one-out backtest.  Identical to
-    `build_model()` — the ensemble is a fixed configuration, so there is
+    `build_model()`: the ensemble is a fixed configuration, so there is
     no hyperparameter search to skip anymore."""
     return _build_pipeline()
 
@@ -1257,7 +1257,7 @@ _RECENCY_DECAY = 0.85
 def _training_sample_weights(train_df) -> np.ndarray:
     """Combined per-row training weights: winner-class balancing (see
     `_winner_sample_weights`) multiplied by a recency decay so recent
-    seasons — raced under the current regulations — drive the fit."""
+    seasons: raced under the current regulations, drive the fit."""
     w = _winner_sample_weights(train_df["Winner"])
     years = pd.to_numeric(train_df["Year"], errors="coerce").to_numpy(dtype=float)
     max_year = np.nanmax(years) if len(years) else 0.0
@@ -1393,7 +1393,7 @@ def run_predictions(progress_callback=None, target_year=2026):
         ]
         pred_winner = last_race_preds[0]
         actual_winner = test_df[test_df["Winner"] == 1]
-        actual_abbr = actual_winner.iloc[0]["Abbreviation"] if not actual_winner.empty else "—"
+        actual_abbr = actual_winner.iloc[0]["Abbreviation"] if not actual_winner.empty else "--"
 
         # Next round – find the actual next upcoming race by date
         report("Predicting next race...")
@@ -1457,7 +1457,7 @@ def run_predictions(progress_callback=None, target_year=2026):
         )
         accuracy = float(best_model.score(X_te, y_te))
 
-        # Feature importance for algorithm viz — aggregated across the
+        # Feature importance for algorithm viz, aggregated across the
         # ensemble members that expose impurity importances.
         try:
             clf = best_model.named_steps["classifier"]
@@ -1635,7 +1635,7 @@ def _backtest_one_race(args):
     pred_row = test_df.sort_values("WinProbability", ascending=False).iloc[0]
     pred_abbr = pred_row["Abbreviation"]
     actual_row = test_df[test_df["Winner"] == 1]
-    actual_abbr = actual_row.iloc[0]["Abbreviation"] if not actual_row.empty else "—"
+    actual_abbr = actual_row.iloc[0]["Abbreviation"] if not actual_row.empty else "--"
 
     return {
         "year": int(year),

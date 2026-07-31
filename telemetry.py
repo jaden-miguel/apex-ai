@@ -125,15 +125,15 @@ def _to_seconds(series) -> np.ndarray:
 
 
 def fmt_laptime(seconds: Optional[float]) -> str:
-    """1:23.456 style lap time.  Returns '—' for missing values."""
+    """1:23.456 style lap time.  Returns '--' for missing values."""
     if seconds is None:
-        return "—"
+        return "--"
     try:
         s = float(seconds)
     except (TypeError, ValueError):
-        return "—"
+        return "--"
     if not math.isfinite(s) or s <= 0:
-        return "—"
+        return "--"
     minutes = int(s // 60)
     rem = s - minutes * 60
     if minutes:
@@ -144,13 +144,13 @@ def fmt_laptime(seconds: Optional[float]) -> str:
 def fmt_delta(seconds: Optional[float]) -> str:
     """Signed gap, e.g. '+0.312' / '-1.204'."""
     if seconds is None:
-        return "—"
+        return "--"
     try:
         s = float(seconds)
     except (TypeError, ValueError):
-        return "—"
+        return "--"
     if not math.isfinite(s):
-        return "—"
+        return "--"
     return f"{s:+.3f}"
 
 
@@ -158,7 +158,7 @@ def fmt_gap(seconds: Optional[float], laps_down: int = 0) -> str:
     if laps_down > 0:
         return f"+{laps_down}L"
     if seconds is None or not math.isfinite(seconds):
-        return "—"
+        return "--"
     if seconds <= 0.0005:
         return "LEADER"
     return f"+{seconds:.3f}"
@@ -464,7 +464,7 @@ class Replay:
         """How long ago the current leader was at this car's track position.
 
         Progress is monotonic, so a plain interpolation of the leader's
-        progress-vs-time curve inverts cleanly into a time gap — the same
+        progress-vs-time curve inverts cleanly into a time gap, using the same
         definition a real timing screen uses.
         """
         lp = leader.progress[:frame + 1]
@@ -497,7 +497,7 @@ class Replay:
         }
 
     def telemetry_at(self, abbr: str, frame: int) -> Optional[dict]:
-        """Live channel readout for one driver — the replay HUD."""
+        """Live channel readout for one driver: the replay HUD."""
         frame = int(np.clip(frame, 0, max(0, self.n_frames - 1)))
         for d in self.drivers:
             if d.info.abbr == abbr:
@@ -576,7 +576,7 @@ def available_sessions(year: int, round_no: int) -> list[tuple[str, str]]:
             out.append((code, nm))
     if not out:
         return default
-    # Race first, then quali, then the rest — most-wanted at the top.
+    # Race first, then quali, then the rest, most-wanted at the top.
     priority = {"R": 0, "S": 1, "Q": 2, "SQ": 3, "SS": 3,
                 "FP3": 4, "FP2": 5, "FP1": 6}
     out.sort(key=lambda c: priority.get(c[0], 9))
@@ -630,7 +630,7 @@ def _assert_loaded(session, year: int, round_no: int, code: str,
     a session the feed has no data for is logged as a warning and `load()`
     returns normally with nothing attached.  Every later access then dies
     on `DataNotLoadedError`, which surfaces to the user as either a bare
-    "no drivers found" or FastF1's own "see Session.load" jargon — neither
+    "no drivers found" or FastF1's own "see Session.load" jargon, neither
     of which says what actually went wrong.  Check once, here, and say it
     plainly.
     """
@@ -644,7 +644,7 @@ def _assert_loaded(session, year: int, round_no: int, code: str,
         ) from None
     if laps is None or not len(laps):
         raise ValueError(
-            f"{label} returned an empty timing sheet — the session may not "
+            f"{label} returned an empty timing sheet; the session may not "
             f"have run yet."
         )
     if with_telemetry and not (_safe_stream(session, "pos_data")
@@ -719,7 +719,7 @@ def driver_table(session, team_colors: Optional[dict] = None) -> list[DriverInfo
     if out:
         return out
 
-    # Results can be empty for some practice sessions — fall back to laps.
+    # Results can be empty for some practice sessions; fall back to laps.
     try:
         laps = session.laps
     except Exception:
@@ -740,7 +740,7 @@ def driver_table(session, team_colors: Optional[dict] = None) -> list[DriverInfo
 
 def lap_table(session, abbr: str) -> list[LapInfo]:
     """Every lap the driver completed, newest data first formatted for a
-    picker.  Laps without a time (in/out laps, aborted runs) are kept —
+    picker.  Laps without a time (in/out laps, aborted runs) are kept,
     you may well want to look at an out-lap's telemetry."""
     try:
         laps = session.laps.pick_drivers(abbr)
@@ -911,7 +911,7 @@ def lap_telemetry(session, abbr: str, lap_number: Optional[int] = None,
 
     # Anchor the time axis to the official lap time.  The car-data slice
     # for a lap starts and ends on telemetry samples, not on the timing
-    # beam, so the trace covers slightly less than the whole lap — and by a
+    # beam, so the trace covers slightly less than the whole lap, and by a
     # different amount for every lap (0.1 s for one car, 0.45 s for the next
     # in the same race).  Left alone, that turns into a spurious few tenths
     # in any lap-to-lap delta.  Stretching `elapsed` onto the real lap time
@@ -988,7 +988,7 @@ def compare_laps(ref: LapTelemetry, other: LapTelemetry,
                  minisectors: int = DEFAULT_MINISECTORS) -> Comparison:
     """Align two laps on distance and derive the delta + sector dominance.
 
-    The laps do not need to share a session — only a circuit.
+    The laps do not need to share a session, only a circuit.
 
     Alignment is by *fraction of the lap*, not by raw metres.  FastF1
     derives `Distance` by integrating the speed channel, and that
@@ -1066,7 +1066,7 @@ def _same_circuit(a: LapTelemetry, b: LapTelemetry) -> bool:
 DEFAULT_REPLAY_HZ = 4.0
 
 # Centreline resolution used to project cars onto track progress.  240
-# points is ~20 m on a typical circuit — fine enough to order cars
+# points is ~20 m on a typical circuit, fine enough to order cars
 # correctly, coarse enough that the projection stays a couple of seconds
 # of numpy rather than a couple of minutes.
 CENTERLINE_POINTS = 240
@@ -1087,7 +1087,7 @@ def load_cached_replay(year: int, round_no: int, code: str,
         with open(path, "rb") as fh:
             obj = pickle.load(fh)
     except Exception:
-        # A truncated or stale pickle should never be fatal — just rebuild.
+        # A truncated or stale pickle should never be fatal, just rebuild.
         try:
             path.unlink()
         except Exception:
@@ -1194,7 +1194,7 @@ def build_replay(session, hz: float = DEFAULT_REPLAY_HZ,
     car_data = _safe_stream(session, "car_data") or {}
     if not pos_data:
         raise ValueError(
-            "This session has no position data — replay needs the car "
+            "This session has no position data, replay needs the car "
             "telemetry stream, which F1 only publishes for 2018 onwards."
         )
 
@@ -1341,7 +1341,7 @@ def build_replay(session, hz: float = DEFAULT_REPLAY_HZ,
         lap_no = np.clip(completed + 1, 1, None).astype(np.int16)
 
         # Pair each stint compound with the lap it started on, then sort the
-        # pair together — searchsorted needs an ascending key array and the
+        # pair together, searchsorted needs an ascending key array and the
         # compound list has to stay aligned with it.
         if len(lap_start) and len(comps) == len(lap_start):
             ok = np.isfinite(lap_start)

@@ -43,7 +43,7 @@ try:
 except ImportError:
     HAS_PIL = False
 
-# Matplotlib is only needed once a chart is actually drawn — the feature
+# Matplotlib is only needed once a chart is actually drawn: the feature
 # importance bars and the telemetry traces.  Importing pyplot costs ~1.5 s,
 # so it is loaded on first use instead of at launch.  `Agg` is selected
 # before pyplot is imported, exactly as it was at module scope.
@@ -122,7 +122,7 @@ BG_CARD = "#2A2A33"     # Cards / panels
 BG_HOVER = "#33333D"    # Hover state
 BORDER = "#3D3D44"      # Subtle neutral border
 # Accent reds (all variants of official F1 Red #E10600).
-GOLD = "#E10600"        # Primary accent — official F1 Red
+GOLD = "#E10600"        # Primary accent, official F1 Red
 GOLD_DIM = "#5A0300"    # Pressed / dim state
 GOLD_GLOW = "#FF1A1A"   # Bright hover / glow
 WHITE = "#F6F4F1"       # F1 broadcast off-white (kinder on dark bg than pure white)
@@ -341,7 +341,7 @@ def _make_trophy_image(height: int = 60, tier: str = "gold"):
     H_out = max(24, int(height))
     W_out = max(20, int(H_out * 0.85))
 
-    # Supersampling factor — PIL's draw primitives don't anti-alias, which
+    # Supersampling factor, PIL's draw primitives don't anti-alias, which
     # is what makes the trophy look 8-bit/pixelated.  We render at 4x and
     # downsample with LANCZOS so every curve gets free anti-aliasing.
     SS = 4
@@ -444,7 +444,7 @@ def _make_trophy_image(height: int = 60, tier: str = "gold"):
          (cx + base_top_w / 2 - 2 * SS, base_top + SS)],
         fill=gold_hi, width=SS,
     )
-    # Engraving on the base — "F1" for gold, "2"/"3" for silver/bronze.
+    # Engraving on the base: "F1" for gold, "2"/"3" for silver/bronze.
     # Silver/bronze numerals use the trophy's own dark tone so they read
     # like a tasteful etched engraving instead of fighting the F1 red.
     if H_out >= 36:
@@ -1266,7 +1266,7 @@ class ApexAI:
 
     # -- Logo cache --
     def _logo(self, team: str, sz: int = 24):
-        # NOTE: logos are kept fully transparent (RGBA) — flattening them
+        # NOTE: logos are kept fully transparent (RGBA): flattening them
         # onto a solid square made every logo show up as a visible box on
         # any container whose colour differs (e.g. the maroon hero card).
         k = f"{team}_{sz}"
@@ -1300,7 +1300,7 @@ class ApexAI:
         hdr.pack(fill=tk.X)
 
         # Left: official F1-style logo + bold ApexAI wordmark + caption.
-        # The logo and wordmark double as a "home" button — clicking
+        # The logo and wordmark double as a "home" button, clicking
         # either takes the user back to the predictions view (the
         # last predicted race), much like a website logo.
         logo_img = _make_f1_logo(32) if HAS_PIL else None
@@ -1361,13 +1361,13 @@ class ApexAI:
         )
         self._caption_lbl.pack(anchor="w", pady=(1, 0))
 
-        # Right: telemetry cluster — SYS heartbeat LED, session clock,
+        # Right: telemetry cluster, SYS heartbeat LED, session clock,
         # model + accuracy modules.  Reads like the top strip of a pit-wall
         # timing console.
         chips = tk.Frame(hdr, bg=BG)
         chips.pack(side=tk.RIGHT)
         self.acc_chip = self._make_chip(
-            chips, "ACCURACY", "—", muted=True,
+            chips, "ACCURACY", "--", muted=True,
         )
         self.acc_chip.pack(side=tk.RIGHT, padx=(8, 0))
         self.model_chip = self._make_chip(
@@ -1546,14 +1546,14 @@ class ApexAI:
 
         # ── Right panel: model insight column ──
         # Three clean cards instead of one giant dump:
-        #   1. MODEL STATS — accuracy, model id, training scope
-        #   2. FEATURE IMPORTANCE — re-rendered chart (short labels)
-        #   3. HOW IT WORKS — 4 plain-English bullets, no code
+        #   1. MODEL STATS, accuracy, model id, training scope
+        #   2. FEATURE IMPORTANCE, re-rendered chart (short labels)
+        #   3. HOW IT WORKS: 4 plain-English bullets, no code
         right = tk.Frame(body, bg=BG, width=360)
         right.pack(side=tk.RIGHT, fill=tk.Y)
         right.pack_propagate(False)
 
-        # Card 1 — model telemetry (compact 4-row readout)
+        # Card 1, model telemetry (compact 4-row readout)
         stats = tk.Frame(right, bg=BG_CARD, padx=14, pady=10)
         stats.pack(fill=tk.X, pady=(0, 10))
         stats.configure(highlightbackground=BORDER, highlightthickness=1)
@@ -1571,7 +1571,7 @@ class ApexAI:
             row.pack(fill=tk.X, pady=1)
             tk.Label(row, text=label, font=(self.MONO, 8),
                      fg=MUTED, bg=BG_CARD).pack(side=tk.LEFT)
-            v = tk.Label(row, text="—", font=(self.MONO, 10, "bold"),
+            v = tk.Label(row, text="--", font=(self.MONO, 10, "bold"),
                          fg=WHITE, bg=BG_CARD)
             v.pack(side=tk.RIGHT)
             setattr(self, value_tk_attr, v)
@@ -1582,7 +1582,7 @@ class ApexAI:
         _stat_row("FEATURES",       "_stat_features")
         self._stat_algo.configure(text="ENS v6", fg=F1_RED)
 
-        # Card 2 — feature importance chart
+        # Card 2, feature importance chart
         chart_card = tk.Frame(right, bg=BG_CARD, padx=12, pady=10)
         chart_card.pack(fill=tk.X, pady=(0, 10))
         chart_card.configure(highlightbackground=BORDER, highlightthickness=1)
@@ -1600,7 +1600,7 @@ class ApexAI:
         self.chart_lbl = tk.Label(chart_card, bg=BG_CARD)
         self.chart_lbl.pack(anchor="w", fill=tk.X, pady=(4, 0))
 
-        # Card 3 — plain-English "how it works".  2 bullets instead of 4
+        # Card 3, plain-English "how it works".  2 bullets instead of 4
         # to keep the whole right rail above the fold at 920 px height.
         how_card = tk.Frame(right, bg=BG_CARD, padx=14, pady=10)
         how_card.pack(fill=tk.X)
@@ -1689,7 +1689,7 @@ class ApexAI:
     # a number reads at any size, a silhouette needs the extra couple of
     # pixels to stay legible.
     _TAB_ICON_PX = 17
-    # Idle glyphs use GRAY rather than the MUTED of the old index key —
+    # Idle glyphs use GRAY rather than the MUTED of the old index key,
     # MUTED is a caption colour and at 17 px a shape in it disappears.
     _TAB_ICON_IDLE = GRAY
 
@@ -1712,7 +1712,7 @@ class ApexAI:
 
     @staticmethod
     def _icon_flag(d, s, c):
-        """Chequered flag — Predict."""
+        """Chequered flag: Predict."""
         lw = max(1, int(s * 0.07))
         d.line([(s * 0.17, s * 0.08), (s * 0.17, s * 0.93)], fill=c, width=lw)
         x0, y0, cell = s * 0.27, s * 0.17, s * 0.19
@@ -1727,7 +1727,7 @@ class ApexAI:
 
     @staticmethod
     def _icon_bars(d, s, c):
-        """Bar chart — Backtest."""
+        """Bar chart: Backtest."""
         base = s * 0.87
         d.line([(s * 0.11, base), (s * 0.91, base)], fill=c,
                width=max(1, int(s * 0.06)))
@@ -1738,7 +1738,7 @@ class ApexAI:
 
     @staticmethod
     def _icon_track(d, s, c):
-        """Circuit silhouette — Visualization.
+        """Circuit silhouette: Visualization.
 
         A closed kidney loop rather than a plain ellipse: an oval reads as
         a generic ring at tab size, whereas the hairpin on the bottom edge
@@ -1754,7 +1754,7 @@ class ApexAI:
 
     @staticmethod
     def _icon_radio(d, s, c):
-        """Microphone — Team Radio.
+        """Microphone: Team Radio.
 
         Concentric broadcast waves were the first shape here, but four thin
         arcs collapse into dashes once the glyph is down at tab size.  A
@@ -1771,14 +1771,14 @@ class ApexAI:
 
     @classmethod
     def _icon_replay(cls, d, s, c):
-        """Circular arrow wrapped round a play triangle — Replays."""
+        """Circular arrow wrapped round a play triangle: Replays."""
         cls._circular_arrow(d, s, c)
         d.polygon([(s * 0.43, s * 0.36), (s * 0.43, s * 0.64),
                    (s * 0.66, s * 0.50)], fill=c)
 
     @classmethod
     def _icon_refresh(cls, d, s, c):
-        """The same circular arrow, without the play mark — Refresh."""
+        """The same circular arrow, minus the play mark: Refresh."""
         cls._circular_arrow(d, s, c)
 
     @staticmethod
@@ -1796,9 +1796,9 @@ class ApexAI:
 
     @staticmethod
     def _icon_gauge(d, s, c):
-        """Speedometer sweep with a needle — Telemetry."""
+        """Speedometer sweep with a needle: Telemetry."""
         lw = max(1, int(s * 0.10))
-        # Full dial kept inside the canvas — an arc box running past the
+        # Full dial kept inside the canvas; an arc box running past the
         # bottom edge gets clipped and the sweep loses its ends.
         d.arc([s * 0.08, s * 0.16, s * 0.92, s * 1.00],
               start=180, end=360, fill=c, width=lw)
@@ -1888,8 +1888,8 @@ class ApexAI:
 
     def _make_subtab(self, parent, text, cmd):
         """Segment of an in-tab mode switch (used by the Replays hub).
-        Deliberately quieter than a console tab — no number key, no
-        light-bar — so it reads as a choice *within* the engaged mode
+        Deliberately quieter than a console tab (no number key, no
+        light-bar) so it reads as a choice *within* the engaged mode
         rather than as another top-level mode."""
         wrap = tk.Frame(parent, bg=BG_SURFACE, cursor="hand2",
                         highlightbackground=BORDER, highlightthickness=1)
@@ -1999,7 +1999,7 @@ class ApexAI:
     def _make_chip(self, parent, label, value, muted=False, accent=False):
         """Telemetry module for the header cluster: a bordered dark panel
         with a red index bar on the left, a tiny mono caption stacked above
-        a bold mono value — reads like one cell of a pit-wall timing screen.
+        a bold mono value; reads like one cell of a pit-wall timing screen.
         Returns the outer Frame; the value label is exposed as
         ``chip._value`` so the caller can update it later."""
         outer = tk.Frame(parent, bg=BG_SURFACE)
@@ -2052,7 +2052,7 @@ class ApexAI:
         Windows / X11 deliver `event.delta` in multiples of ±120
         (one notch = 120) so we divide.  macOS delivers small
         integers (typically ±1, occasionally ±3) so dividing by 120
-        always rounds to 0 — which is why scrolling silently did
+        always rounds to 0, which is why scrolling silently did
         nothing on macOS before.  Use the raw delta directly when
         |delta| < 120, otherwise scale.
         """
@@ -2122,7 +2122,7 @@ class ApexAI:
             if self.result.get("_has_model"):
                 # A fitted ensemble is on disk but not in memory yet.
                 # Unpickling it pulls in all of sklearn (~3.5 s), so do it
-                # on a worker thread rather than freezing the console —
+                # on a worker thread rather than freezing the console,
                 # then pick up where we left off.
                 self._set_status("Warming up the cached model…")
 
@@ -2131,7 +2131,7 @@ class ApexAI:
 
                     def done():
                         if model is None:
-                            # Cache turned out to be unusable — fall
+                            # Cache turned out to be unusable, fall
                             # through to a full prediction run.
                             self.result.pop("_has_model", None)
                             self._on_predict()
@@ -2522,7 +2522,7 @@ class ApexAI:
                  font=("Helvetica Neue", 10, "bold"),
                  fg=fg, bg=bg).place(x=track_w + 8, y=3)
 
-        # Hover effect — subtle elevation across the whole row.
+        # Hover effect, subtle elevation across the whole row.
         def _hover(entering, widgets=(row,)):
             target_bg = BG_HOVER if entering else bg
             row.configure(bg=target_bg)
@@ -2688,7 +2688,7 @@ class ApexAI:
             else:
                 self._set_status("Showing last prediction")
         else:
-            self._set_status("No prediction yet — click Predict Next Race")
+            self._set_status("No prediction yet. Click Predict Next Race")
 
     def _switch_to_view(self, view):
         self._current_view = view
@@ -2771,7 +2771,7 @@ class ApexAI:
         """
         if mode == "replay" and not HAS_TELEMETRY:
             self._set_status("FastF1 is required for the live session "
-                             "replay — showing the broadcast archive")
+                             "replay: showing the broadcast archive")
             mode = "replays"
         if mode == "replay":
             if not self._replay_built:
@@ -3663,7 +3663,7 @@ class ApexAI:
         """Build a FullRaces.com search URL for a given race + session.
 
         Using the WordPress `?s=` query is more durable than guessing
-        the post slug — every upload's title contains the session
+        the post slug, every upload's title contains the session
         keyword + year + race name, so search hits the right post even
         if the title casing or punctuation drifts.
         """
@@ -3904,7 +3904,7 @@ class ApexAI:
                  ).pack(anchor="w")
 
         # Right column: session buttons.  Disabled-look for upcoming
-        # rounds (still clickable — search may still find practice or
+        # rounds (still clickable, search may still find practice or
         # qualifying clips for ongoing weekends).
         right = tk.Frame(inner, bg=BG_CARD)
         right.pack(side=tk.RIGHT)
@@ -4071,7 +4071,7 @@ class ApexAI:
         st["rounds"] = {label: rnd for label, rnd in rows}
         labels = [label for label, _ in rows]
         st["round_cb"].configure(values=labels)
-        # Default to the most recent round that has actually run — that's
+        # Default to the most recent round that has actually run, that's
         # the one you almost always want to look at.
         done = [lb for lb in labels if "(upcoming)" not in lb]
         st["round_var"].set(done[-1] if done else labels[0])
@@ -4169,7 +4169,7 @@ class ApexAI:
         top.pack(fill=tk.X, pady=(0, 6))
         tk.Label(top, text="TELEMETRY", font=("Helvetica Neue", 16, "bold"),
                  fg=GOLD, bg=BG).pack(side=tk.LEFT)
-        tk.Label(top, text="Overlay any two laps — lap vs lap, compound vs "
+        tk.Label(top, text="Overlay any two laps: lap vs lap, compound vs "
                            "compound, year vs year",
                  font=("Helvetica Neue", 11), fg=MUTED, bg=BG
                  ).pack(side=tk.LEFT, padx=(16, 0), pady=(3, 0))
@@ -4225,8 +4225,8 @@ class ApexAI:
         self._tel_canvas.configure(yscrollcommand=sb.set)
 
         # Pin the scrolled frame to the viewport width.  Without this the
-        # inner frame sizes to its content, and the summary row — which
-        # lays the delta hero out in its own grid column — runs off the
+        # inner frame sizes to its content, and the summary row, which
+        # lays the delta hero out in its own grid column, runs off the
         # right edge with no horizontal scrollbar to reach it.  Guarded on
         # `find_all()` because the canvas emits Configure while empty.
         def _fit_inner(e):
@@ -4254,7 +4254,7 @@ class ApexAI:
 
         Two lines of grey text left the tab looking broken before the first
         comparison, so this states what the feature does and spells out the
-        three overlays it can produce — which is also the least obvious
+        three overlays it can produce, which is also the least obvious
         thing about it, since all three are the same control.
         """
         card = tk.Frame(self._tel_inner, bg=BG_CARD,
@@ -4285,7 +4285,7 @@ class ApexAI:
 
         for accent, name, blurb in (
             (GOLD, "LAP VS LAP",
-             "Two team-mates in the same race — where the time actually goes."),
+             "Two team-mates in the same race, where the time actually goes."),
             ("#4FA3FF", "COMPOUND VS COMPOUND",
              "The same driver on softs and on hards, side by side."),
             ("#57C77E", "YEAR VS YEAR",
@@ -4364,7 +4364,7 @@ class ApexAI:
             self._tel_session_changed("b")
 
     def _tel_session_changed(self, side):
-        """Session selection changed — reload that side's driver list."""
+        """Session selection changed; reload that side's driver list."""
         if side == "a" and bool(self._tel_link.get()):
             self._picker_copy("tel_a", "tel_b")
             self.root.after(0, lambda: self._tel_load_drivers("b"))
@@ -4427,7 +4427,7 @@ class ApexAI:
         fastest = teldata.fastest_lap_number(session, abbr)
         labels = ["Fastest lap"] + [lap.label for lap in laps]
         st["lap_cb"].configure(values=labels)
-        # Default both sides to the fastest lap — the comparison people
+        # Default both sides to the fastest lap, the comparison people
         # reach for first.
         st["lap_var"].set("Fastest lap")
         st["fastest"] = fastest
@@ -4478,7 +4478,7 @@ class ApexAI:
             self._tel_say("Pick a driver on both sides first")
             return
         if a == b:
-            self._tel_say("Both sides are the same lap — pick a different "
+            self._tel_say("Both sides are the same lap. Pick a different "
                           "driver or lap on one side")
             return
 
@@ -4555,7 +4555,7 @@ class ApexAI:
                             highlightthickness=1)
             warn.pack(fill=tk.X, pady=(8, 0))
             tk.Label(warn,
-                     text="⚠  These laps look like different circuits — the "
+                     text="⚠  These laps look like different circuits: the "
                           "distance axis lines up by length only, so read "
                           "the delta with care.",
                      font=("Helvetica Neue", 10), fg="#F0C070", bg="#3A2410",
@@ -4607,7 +4607,7 @@ class ApexAI:
             head.pack(anchor="w", fill=tk.X)
             tk.Frame(head, bg=color, width=5, height=22).pack(
                 side=tk.LEFT, padx=(0, 8), fill=tk.Y)
-            # Team mark next to the code — the fastest way to read which
+            # Team mark next to the code, the fastest way to read which
             # car you are looking at.
             logo = self._logo(lap.team, 22)
             if logo is not None:
@@ -4632,7 +4632,7 @@ class ApexAI:
             # past the card edge and the last one gets clipped.
             stats = tk.Frame(inner, bg=BG_CARD)
             stats.pack(anchor="w", pady=(7, 0), fill=tk.X)
-            tyre = (lap.compound or "—").title()
+            tyre = (lap.compound or "--").title()
             if lap.tyre_life:
                 tyre += f" · {int(lap.tyre_life)} laps"
             for i, (label, value, tint) in enumerate((
@@ -4888,7 +4888,7 @@ class ApexAI:
             w.destroy()
 
         tk.Label(self.replay_frame,
-                 text="Replay any session — live track map, timing "
+                 text="Replay any session: live track map, timing "
                       "screen and telemetry",
                  font=("Helvetica Neue", 11), fg=MUTED, bg=BG,
                  ).pack(anchor="w", pady=(0, 4))
@@ -4961,7 +4961,7 @@ class ApexAI:
             fg=WHITE, bg=BG_SURFACE)
         self._replay_clock.pack(side=tk.RIGHT, padx=(10, 0))
         self._replay_lap_lbl = tk.Label(
-            inner, text="LAP —", font=(self.MONO, 12, "bold"),
+            inner, text="LAP --", font=(self.MONO, 12, "bold"),
             fg=GOLD, bg=BG_SURFACE)
         self._replay_lap_lbl.pack(side=tk.RIGHT, padx=(10, 0))
 
@@ -5043,7 +5043,7 @@ class ApexAI:
         head.pack(fill=tk.X)
         self._hud_accent = tk.Frame(head, bg=GOLD, width=5, height=22)
         self._hud_accent.pack(side=tk.LEFT, padx=(0, 8), fill=tk.Y)
-        self._hud_driver = tk.Label(head, text="—",
+        self._hud_driver = tk.Label(head, text="--",
                                     font=("Helvetica Neue", 15, "bold"),
                                     fg=WHITE, bg=BG_SURFACE)
         self._hud_driver.pack(side=tk.LEFT)
@@ -5053,13 +5053,13 @@ class ApexAI:
 
         speed_row = tk.Frame(inner, bg=BG_SURFACE)
         speed_row.pack(fill=tk.X, pady=(6, 2))
-        self._hud_speed = tk.Label(speed_row, text="—",
+        self._hud_speed = tk.Label(speed_row, text="--",
                                    font=(self.MONO, 26, "bold"),
                                    fg=WHITE, bg=BG_SURFACE)
         self._hud_speed.pack(side=tk.LEFT)
         tk.Label(speed_row, text="km/h", font=(self.MONO, 8), fg=MUTED,
                  bg=BG_SURFACE).pack(side=tk.LEFT, padx=(4, 0), pady=(12, 0))
-        self._hud_gear = tk.Label(speed_row, text="—",
+        self._hud_gear = tk.Label(speed_row, text="--",
                                   font=(self.MONO, 22, "bold"),
                                   fg=GOLD, bg=BG_SURFACE)
         self._hud_gear.pack(side=tk.RIGHT)
@@ -5089,7 +5089,7 @@ class ApexAI:
             cell.pack(side=tk.LEFT, padx=(0, 14))
             tk.Label(cell, text=label, font=(self.MONO, 7), fg=MUTED,
                      bg=BG_SURFACE).pack(anchor="w")
-            val = tk.Label(cell, text="—", font=(self.MONO, 10, "bold"),
+            val = tk.Label(cell, text="--", font=(self.MONO, 10, "bold"),
                            fg=WHITE, bg=BG_SURFACE)
             val.pack(anchor="w")
             self._hud_chips[name] = val
@@ -5154,7 +5154,7 @@ class ApexAI:
         """Fit the circuit into the canvas, preserving aspect ratio.
 
         Canvas Y grows downwards while track coordinates grow upwards, so
-        the Y term is negated — without that every circuit renders
+        the Y term is negated, without that every circuit renders
         mirrored.
         """
         rp = self._replay
@@ -5377,7 +5377,7 @@ class ApexAI:
 
         Car positions move every frame; the timing screen and HUD refresh
         at ~5 Hz.  Re-configuring 24 rows of labels 25 times a second is
-        pure overhead — the numbers can't be read that fast anyway.
+        pure overhead; the numbers can't be read that fast anyway.
         """
         rp = self._replay
         if rp is None:
@@ -5477,9 +5477,9 @@ class ApexAI:
         self._hud_team.configure(text=(hud["team"] or "").upper())
 
         speed = hud["speed"]
-        self._hud_speed.configure(text=f"{speed:.0f}" if speed else "—")
+        self._hud_speed.configure(text=f"{speed:.0f}" if speed else "--")
         gear = hud["gear"]
-        self._hud_gear.configure(text=f"{int(gear)}" if gear else "—")
+        self._hud_gear.configure(text=f"{int(gear)}" if gear else "--")
 
         for name, value in (("throttle", hud["throttle"]),
                             ("brake", (hud["brake"] or 0) * 100.0)):
@@ -5489,16 +5489,16 @@ class ApexAI:
             cv.coords(rect, 0, 0, width * pct / 100.0, 10)
 
         rpm = hud["rpm"]
-        self._hud_chips["rpm"].configure(text=f"{rpm:,.0f}" if rpm else "—")
+        self._hud_chips["rpm"].configure(text=f"{rpm:,.0f}" if rpm else "--")
         # DRS status codes: 10, 12 and 14 mean the flap is actually open;
         # 8 only means the driver is within a second and eligible.
         drs = hud["drs"] or 0
         self._hud_chips["drs"].configure(
-            text="OPEN" if drs >= 10 else "—",
+            text="OPEN" if drs >= 10 else "--",
             fg=GREEN if drs >= 10 else MUTED)
         compound = hud["compound"]
         self._hud_chips["tyre"].configure(
-            text=(compound or "—").title(),
+            text=(compound or "--").title(),
             fg=teldata.compound_color(compound))
         self._hud_chips["lap"].configure(text=str(hud["lap"]))
 
@@ -6192,7 +6192,7 @@ class ApexAI:
                            text="START / FINISH", font=("Helvetica Neue", 7, "bold"),
                            fill=MUTED)
 
-        # ── MOM zones — find the two longest straight stretches ──
+        # ── MOM zones, find the two longest straight stretches ──
         # Threshold: a point is "straight" if its curvature is below
         # the 55th percentile.  The previous median threshold
         # promoted slightly-less-curvy corners to MOM zones; this
@@ -6209,7 +6209,7 @@ class ApexAI:
         # any straight that wraps the seam is captured contiguously.
         # The previous version used `range(num * 2)` and computed a
         # closing length of zero when the entire track passed the
-        # threshold — that effectively dropped the longest run.
+        # threshold: that effectively dropped the longest run.
         runs = []
         if all(positions):
             runs.append((0, num))
@@ -6286,8 +6286,8 @@ class ApexAI:
         cy = (min(ys) + max(ys)) / 2
 
         # The redesigned podium card is a full broadcast-style podium with
-        # three trophies — silver (P2, left), gold (P1, centre, taller and
-        # framed by a laurel wreath) and bronze (P3, right) — sitting on
+        # three trophies, silver (P2, left), gold (P1, centre, taller and
+        # framed by a laurel wreath) and bronze (P3, right): sitting on
         # top of physical "podium step" pedestals stamped with their
         # finishing position.  Each pedestal carries the driver's
         # abbreviation in their team's livery colour and the predicted
@@ -6315,7 +6315,7 @@ class ApexAI:
         canvas.create_rectangle(x0, y0, x1, y0 + 3,
                                 fill=F1_RED, outline="", tags=(PT,))
 
-        # Header strip — small red label, then circuit name + subtitle.
+        # Header strip, small red label, then circuit name + subtitle.
         canvas.create_text(
             x0 + 12, y0 + 14,
             text="NEXT RACE",
@@ -6351,7 +6351,7 @@ class ApexAI:
         n_cols = max(1, len(positions))
         col_w = (card_w - 24) / n_cols  # 12px padding either side
 
-        # Step heights per tier — taller centre step is the gold
+        # Step heights per tier, taller centre step is the gold
         # winner's box.  Trophy height matches so it visually scales
         # with the podium step.
         step_for_tier = {"gold": 46, "silver": 34, "bronze": 26}
@@ -6366,7 +6366,7 @@ class ApexAI:
             sx0 = col_cx - step_w / 2
             sx1 = col_cx + step_w / 2
 
-            # Pedestal — solid charcoal with a subtle gradient suggested
+            # Pedestal: solid charcoal with a subtle gradient suggested
             # by a brighter top edge.
             canvas.create_rectangle(
                 sx0, step_top, sx1, steps_baseline,
@@ -6465,7 +6465,7 @@ class ApexAI:
                     )
                     break
 
-        # ── Animation — only top 8 drivers for performance ──
+        # ── Animation, only top 8 drivers for performance ──
         max_anim = min(8, len(preds))
         n = max_anim
         lead_gap = num * 0.65
@@ -6580,9 +6580,9 @@ class ApexAI:
     # tuples that get instantiated when the visualisation opens.  Atoms are
     # divided into two groups:
     #   • Animated atoms (blossom, lantern, leaf, confetti, …) update every
-    #     tick — keep counts modest.
+    #     tick: keep counts modest.
     #   • Decor atoms (bonsai, palm, sun, moon, mountain, dune, …) are
-    #     painted once as static PIL silhouettes — they cost nothing per
+    #     painted once as static PIL silhouettes; they cost nothing per
     #     frame, so we can use them more freely to set the mood.
     SCENE_ANIMS = {
         # Australia · eucalyptus drift + roo
@@ -7169,7 +7169,7 @@ class ApexAI:
     _FRAME_INTERVAL_MS = 33
     # Driver labels follow their cars at ~10 fps (every 3rd frame at the
     # 30 fps base).  We *stagger* across drivers (`(frame + i) % N`) so
-    # only ~2-3 of the 8 cards refresh in any single tick — this keeps the
+    # only ~2-3 of the 8 cards refresh in any single tick; this keeps the
     # dirty-rect cost almost flat across frames instead of producing one
     # heavy "all-cards" frame every Nth tick.
     _LABEL_FOLLOW_EVERY_N = 3
