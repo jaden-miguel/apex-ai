@@ -13,6 +13,15 @@ scrubbable data-driven replay of any session since 2018.
 
 ![ApexAI racing-console GUI — v6 ensemble predictions](screenshot.png)
 
+*The Predict tab: podium, full grid with calibrated win probabilities,
+and the feature importances behind the pick.*
+
+![ApexAI telemetry overlay — Norris vs Antonelli, 2026 Hungarian GP](screenshot-telemetry.png)
+
+*The Telemetry tab: two laps of the 2026 Hungarian Grand Prix on a
+shared axis. The closing delta (−0.076 s) is exactly the gap between the
+two lap times — see the alignment notes below.*
+
 > Looking for the full product spec? See [`docs/PRD.md`](docs/PRD.md).
 
 ## Highlights

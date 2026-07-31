@@ -4587,7 +4587,9 @@ class ApexAI:
         delta off the edge) while the delta hero keeps its own column.
         """
         row = tk.Frame(parent, bg=BG)
-        row.pack(fill=tk.X, pady=(8, 0))
+        # Two pixels of right pad so the delta card's border doesn't sit
+        # flush against the scrollbar now that the row fills the viewport.
+        row.pack(fill=tk.X, pady=(8, 0), padx=(0, 2))
         row.columnconfigure(0, weight=1, uniform="lap")
         row.columnconfigure(2, weight=1, uniform="lap")
         c_a, c_b = self._tel_pair_colors(comparison)
