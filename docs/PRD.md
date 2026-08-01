@@ -248,6 +248,22 @@ need to follow the race.
   in `track_layouts.py` (Suzuka figure-8, Baku L-shape, Spa triangle,
   etc.) and rendered with aspect-preserving fit + dynamic padding so
   the track is never cropped.
+- **F3.4a.** **Per-Grand-Prix trophy.** The winner's trophy is drawn from
+  one of five silhouette families keyed to the circuit: a two-handled
+  loving cup for the historic European rounds, a domed lidded cup for
+  Britain, a wide shallow bowl for Monaco, a tall tapering column for the
+  Middle-Eastern circuits, an angular sculpture for the newer American
+  races. These are **stylised families, not replicas** -- F1 trophies are
+  commissioned per race and their exact designs are not something the app
+  can verify, so what is encoded is the broad silhouette each race is
+  known for. Unlisted circuits fall back to the classic cup.
+- **F3.4b.** **Metal shading.** The silhouette is built as a mask and
+  shaded through a single vertical gradient (dark crown, specular band
+  across the upper third, mid body, dark foot, bounce-light rim) plus a
+  blurred specular streak, a rim light and a contact shadow. Previously
+  each part was a flat polygon with its own outline, which read as a
+  sticker; one gradient across the whole mask means cup, stem and base
+  share consistent lighting.
 - **F3.5.** Center podium card with three procedural trophies
   (super-sampled at 4× then anti-aliased with `Image.LANCZOS` so the
   trophies don't look 8-bit).

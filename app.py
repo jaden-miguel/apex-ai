@@ -314,23 +314,108 @@ _TROPHY_PALETTES = {
 }
 
 
-def _make_trophy_image(height: int = 60, tier: str = "gold"):
-    """Render a stylised F1-style podium trophy as a PIL RGBA image.
+# Which trophy silhouette each Grand Prix gets.
+#
+# These are *stylised families*, not replicas: F1 trophies are commissioned
+# per race and their exact designs are not something this app can verify, so
+# what is encoded here is the broad silhouette each race is known for -- a
+# classic two-handled loving cup for the historic European rounds, a tall
+# slim column for the modern Middle-Eastern circuits, a wide shallow bowl for
+# Monaco, a lidded cup for Britain's RAC-style trophy, an angular sculpture
+# for the newer American races.  Anything unlisted falls back to "classic".
+_TROPHY_PROFILES = {
+    "Monaco":               "bowl",
+    "Silverstone":          "lidded",
+    "Spa-Francorchamps":    "classic",
+    "Monza":                "column",
+    "Suzuka":               "classic",
+    "Yas Marina":           "column",
+    "Jeddah":               "column",
+    "Lusail":               "column",
+    "Sakhir":               "column",
+    "Miami":                "sculpture",
+    "Las Vegas":            "sculpture",
+    "Circuit of the Americas": "sculpture",
+    "Zandvoort":            "classic",
+    "Montreal":             "classic",
+    "Interlagos":           "classic",
+    "Hungaroring":          "classic",
+    "Red Bull Ring":        "classic",
+    "Baku City Circuit":    "column",
+    "Marina Bay":           "column",
+    "Shanghai":             "column",
+    "Albert Park":          "classic",
+    "Imola":                "classic",
+    "Barcelona":            "classic",
+    "Mexico City":          "sculpture",
+}
 
-    Cached by ``(height, tier)`` – the trophy is static once drawn, so
-    re-renders are free.  The result is roughly square (slightly taller
-    than wide to fit the cup + stem + base proportions of a real F1
-    trophy).
 
-    Painted in four metallic tones (highlight → mid → dark → edge) so the
-    cup reads as a 3D object on the dark podium card rather than as a
-    flat silhouette.  An "F1" engraving on the base ties it back to the
-    brand on the gold trophy; silver/bronze get position numerals (2/3)
-    instead so the three trophies are unambiguous from a glance.
+def _trophy_profile_for(circuit: str) -> str:
+    return _TROPHY_PROFILES.get(circuit or "", "classic")
+
+
+def _metal_fill(size, mask, palette, SS):
+    """Shade a silhouette like polished metal.
+
+    A flat fill plus one highlight ellipse (what this used to be) reads as a
+    sticker.  Real metal has a vertical banding: dark at the very top where
+    it catches the sky, a bright specular band across the upper third, a
+    mid tone, then a darker foot with a bounce-light rim.  Building that as
+    a gradient and masking it with the silhouette gives every part of the
+    trophy consistent lighting for free.
+    """
+    hi, mid, dark, edge = palette
+    W, H = size
+    grad = Image.new("RGBA", (1, H))
+    for y in range(H):
+        f = y / max(1, H - 1)
+        if f < 0.10:
+            c = _lerp_rgba(dark, mid, f / 0.10)
+        elif f < 0.28:
+            c = _lerp_rgba(mid, hi, (f - 0.10) / 0.18)
+        elif f < 0.45:
+            c = _lerp_rgba(hi, mid, (f - 0.28) / 0.17)
+        elif f < 0.80:
+            c = _lerp_rgba(mid, dark, (f - 0.45) / 0.35)
+        else:
+            c = _lerp_rgba(dark, edge, (f - 0.80) / 0.20)
+        grad.putpixel((0, y), c)
+    body = grad.resize((W, H), Image.BILINEAR)
+
+    # Vertical specular streak slightly left of centre, as if lit from
+    # upper-left, so the cup reads as round rather than as a flat shape.
+    spec = Image.new("L", (W, H), 0)
+    sd = ImageDraw.Draw(spec)
+    sd.ellipse([W * 0.30, H * 0.04, W * 0.44, H * 0.72], fill=150)
+    spec = spec.filter(ImageFilter.GaussianBlur(radius=max(1, SS)))
+    body.paste(Image.new("RGBA", (W, H), hi), (0, 0), spec)
+
+    body.putalpha(mask)
+    return body
+
+
+def _lerp_rgba(a, b, t):
+    t = max(0.0, min(1.0, t))
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(4))
+
+
+def _make_trophy_image(height: int = 60, tier: str = "gold",
+                       profile: str = "classic"):
+    """Render an F1 podium trophy as a PIL RGBA image.
+
+    Cached by ``(height, tier, profile)``.  `profile` selects the
+    silhouette family for the Grand Prix (see `_TROPHY_PROFILES`); the
+    shapes are stylised, not replicas.
+
+    The silhouette is built as a mask and then shaded by `_metal_fill`, so
+    cup, stem and base all share one consistent lighting model instead of
+    each being a flat polygon with its own outline.  A contact shadow and
+    a reflection on the plinth seat it on the podium step.
     """
     if not HAS_PIL:
         return None
-    cache_key = (int(height), tier)
+    cache_key = (int(height), tier, profile)
     if cache_key in _TROPHY_CACHE:
         return _TROPHY_CACHE[cache_key]
 
@@ -338,119 +423,121 @@ def _make_trophy_image(height: int = 60, tier: str = "gold"):
     gold_hi, gold_mid, gold_dark, gold_edge = palette
     base_label = {"gold": "F1", "silver": "2", "bronze": "3"}.get(tier, "F1")
 
-    # Final output size.
     H_out = max(24, int(height))
     W_out = max(20, int(H_out * 0.85))
-
-    # Supersampling factor, PIL's draw primitives don't anti-alias, which
-    # is what makes the trophy look 8-bit/pixelated.  We render at 4x and
-    # downsample with LANCZOS so every curve gets free anti-aliasing.
     SS = 4
-    H = H_out * SS
-    W = W_out * SS
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
+    H, W = H_out * SS, W_out * SS
     cx = W / 2.0
 
-    # ── Cup body ──
-    cup_top = int(H * 0.08)
-    cup_bot = int(H * 0.50)
-    cup_w   = int(W * 0.62)
-    draw.ellipse(
-        [cx - cup_w / 2, cup_top, cx + cup_w / 2, cup_bot],
-        fill=gold_mid, outline=gold_edge, width=SS,
-    )
-    # Lip (thin band at the top of the cup)
-    lip_h = max(2 * SS, int(H * 0.05))
-    draw.ellipse(
-        [cx - cup_w / 2, cup_top - SS,
-         cx + cup_w / 2, cup_top + lip_h],
-        fill=gold_dark, outline=gold_edge, width=SS,
-    )
-    # Inner well (darker oval to suggest cup depth)
-    draw.ellipse(
-        [cx - cup_w / 2 + 2 * SS, cup_top + SS,
-         cx + cup_w / 2 - 2 * SS, cup_top + lip_h - SS],
-        fill=gold_edge, outline=None,
-    )
-    # Highlight – small lighter ellipse on the upper-left curve
-    hl_x0 = cx - cup_w / 3
-    hl_y0 = cup_top + lip_h + 2 * SS
-    hl_x1 = hl_x0 + cup_w * 0.18
-    hl_y1 = hl_y0 + (cup_bot - cup_top) * 0.55
-    draw.ellipse([hl_x0, hl_y0, hl_x1, hl_y1], fill=gold_hi, outline=None)
+    # ── Silhouette mask ──
+    mask = Image.new("L", (W, H), 0)
+    m = ImageDraw.Draw(mask)
 
-    # ── Handles (curved arcs hugging the cup) ──
-    handle_w = max(3 * SS, int(W * 0.16))
-    h_top = int(H * 0.16)
-    h_bot = int(H * 0.42)
-    # Left
-    draw.arc(
-        [cx - cup_w / 2 - handle_w + SS, h_top,
-         cx - cup_w / 2 + 4 * SS,        h_bot],
-        start=60, end=300, fill=gold_mid, width=3 * SS,
-    )
-    draw.arc(
-        [cx - cup_w / 2 - handle_w + SS, h_top,
-         cx - cup_w / 2 + 4 * SS,        h_bot],
-        start=60, end=300, fill=gold_edge, width=SS,
-    )
-    # Right
-    draw.arc(
-        [cx + cup_w / 2 - 4 * SS,        h_top,
-         cx + cup_w / 2 + handle_w - SS, h_bot],
-        start=240, end=120, fill=gold_mid, width=3 * SS,
-    )
-    draw.arc(
-        [cx + cup_w / 2 - 4 * SS,        h_top,
-         cx + cup_w / 2 + handle_w - SS, h_bot],
-        start=240, end=120, fill=gold_edge, width=SS,
-    )
+    if profile == "bowl":
+        # Monaco: a wide, shallow bowl on a short foot.
+        cup_top, cup_bot, cup_w = H * 0.20, H * 0.50, W * 0.78
+        # Bottom half of a tall ellipse: a shallow open bowl.  A full
+        # ellipse with a rectangle under it reads as a mushroom cap.
+        m.pieslice([cx - cup_w / 2, cup_top - (cup_bot - cup_top) * 1.15,
+                    cx + cup_w / 2, cup_bot],
+                   start=0, end=180, fill=255)
+        # Rolled rim.
+        m.ellipse([cx - cup_w / 2, cup_top - H * 0.030,
+                   cx + cup_w / 2, cup_top + H * 0.030], fill=255)
+        stem_top, stem_bot = cup_bot - H * 0.02, H * 0.74
+        m.polygon([(cx - W * 0.07, stem_top), (cx + W * 0.07, stem_top),
+                   (cx + W * 0.11, stem_bot), (cx - W * 0.11, stem_bot)],
+                  fill=255)
+    elif profile == "column":
+        # Modern circuits: a tall tapering column, no handles.
+        m.polygon([(cx - W * 0.22, H * 0.06), (cx + W * 0.22, H * 0.06),
+                   (cx + W * 0.13, H * 0.62), (cx - W * 0.13, H * 0.62)],
+                  fill=255)
+        m.ellipse([cx - W * 0.22, H * 0.02, cx + W * 0.22, H * 0.12], fill=255)
+        stem_top, stem_bot = H * 0.60, H * 0.76
+        m.polygon([(cx - W * 0.13, stem_top), (cx + W * 0.13, stem_top),
+                   (cx + W * 0.16, stem_bot), (cx - W * 0.16, stem_bot)],
+                  fill=255)
+    elif profile == "sculpture":
+        # Newer American races: an angular wedge rather than a cup.
+        m.polygon([(cx - W * 0.05, H * 0.05), (cx + W * 0.30, H * 0.30),
+                   (cx + W * 0.16, H * 0.66), (cx - W * 0.22, H * 0.66),
+                   (cx - W * 0.30, H * 0.28)], fill=255)
+        stem_top, stem_bot = H * 0.64, H * 0.76
+        m.polygon([(cx - W * 0.12, stem_top), (cx + W * 0.12, stem_top),
+                   (cx + W * 0.15, stem_bot), (cx - W * 0.15, stem_bot)],
+                  fill=255)
+    else:
+        # classic / lidded: a two-handled loving cup.
+        cup_top, cup_bot, cup_w = H * 0.14, H * 0.52, W * 0.60
+        m.ellipse([cx - cup_w / 2, cup_top, cx + cup_w / 2, cup_bot], fill=255)
+        m.rectangle([cx - cup_w / 2, cup_top + H * 0.02,
+                     cx + cup_w / 2, cup_top + (cup_bot - cup_top) * 0.45],
+                    fill=255)
+        # Handles: an outer arc minus an inner arc leaves a ring of metal.
+        # Seated a third of their width *inside* the cup wall, otherwise
+        # they float alongside it like ears rather than attaching.
+        hw_ = W * 0.135
+        for sgn in (-1, 1):
+            ox = cx + sgn * (cup_w / 2 - hw_ * 0.34)
+            box = [min(ox, ox + sgn * hw_), H * 0.22,
+                   max(ox, ox + sgn * hw_), H * 0.45]
+            m.ellipse(box, fill=255)
+            inner = [box[0] + W * 0.036, box[1] + H * 0.040,
+                     box[2] - W * 0.036, box[3] - H * 0.040]
+            if inner[2] > inner[0] and inner[3] > inner[1]:
+                m.ellipse(inner, fill=0)
+        # Re-assert the cup over the handle roots.
+        m.ellipse([cx - cup_w / 2, cup_top, cx + cup_w / 2, cup_bot], fill=255)
+        m.rectangle([cx - cup_w / 2, cup_top + H * 0.02,
+                     cx + cup_w / 2, cup_top + (cup_bot - cup_top) * 0.45],
+                    fill=255)
+        if profile == "lidded":
+            # Britain's RAC-style domed lid with a finial.
+            # Dome sits proud of the cup with a lip shoulder under it, so
+            # the join is visible; a dome flush with the rim just looked
+            # like a wider cup.
+            m.ellipse([cx - cup_w * 0.56, cup_top - H * 0.015,
+                       cx + cup_w * 0.56, cup_top + H * 0.045], fill=255)
+            m.pieslice([cx - cup_w * 0.44, cup_top - H * 0.17,
+                        cx + cup_w * 0.44, cup_top + H * 0.03],
+                       start=180, end=360, fill=255)
+            m.ellipse([cx - W * 0.040, cup_top - H * 0.215,
+                       cx + W * 0.040, cup_top - H * 0.135], fill=255)
+        stem_top, stem_bot = cup_bot - H * 0.02, H * 0.76
+        m.polygon([(cx - W * 0.06, stem_top), (cx + W * 0.06, stem_top),
+                   (cx + W * 0.10, stem_bot), (cx - W * 0.10, stem_bot)],
+                  fill=255)
 
-    # ── Stem (tapering bridge between cup and base) ──
-    stem_top = cup_bot - SS
-    stem_bot = int(H * 0.72)
-    stem_top_w = int(W * 0.22)
-    stem_mid_w = int(W * 0.10)
-    stem_bot_w = int(W * 0.14)
-    # Two trapezoids for a vase-like profile
-    draw.polygon([
-        (cx - stem_top_w / 2, stem_top),
-        (cx + stem_top_w / 2, stem_top),
-        (cx + stem_mid_w / 2, (stem_top + stem_bot) // 2),
-        (cx - stem_mid_w / 2, (stem_top + stem_bot) // 2),
-    ], fill=gold_mid, outline=gold_edge)
-    draw.polygon([
-        (cx - stem_mid_w / 2, (stem_top + stem_bot) // 2),
-        (cx + stem_mid_w / 2, (stem_top + stem_bot) // 2),
-        (cx + stem_bot_w / 2, stem_bot),
-        (cx - stem_bot_w / 2, stem_bot),
-    ], fill=gold_dark, outline=gold_edge)
+    # Plinth, shared by every profile.
+    base_top, base_bot = stem_bot - H * 0.01, H * 0.93
+    m.polygon([(cx - W * 0.30, base_top), (cx + W * 0.30, base_top),
+               (cx + W * 0.38, base_bot), (cx - W * 0.38, base_bot)], fill=255)
 
-    # ── Base plaque (the engraved plinth) ──
-    base_top = stem_bot
-    base_bot = int(H * 0.94)
-    base_top_w = int(W * 0.42)
-    base_bot_w = int(W * 0.55)
-    draw.polygon([
-        (cx - base_top_w / 2, base_top),
-        (cx + base_top_w / 2, base_top),
-        (cx + base_bot_w / 2, base_bot),
-        (cx - base_bot_w / 2, base_bot),
-    ], fill=gold_dark, outline=gold_edge)
-    # Thin highlight along the top of the base for sheen
-    draw.line(
-        [(cx - base_top_w / 2 + 2 * SS, base_top + SS),
-         (cx + base_top_w / 2 - 2 * SS, base_top + SS)],
-        fill=gold_hi, width=SS,
-    )
-    # Engraving on the base: "F1" for gold, "2"/"3" for silver/bronze.
-    # Silver/bronze numerals use the trophy's own dark tone so they read
-    # like a tasteful etched engraving instead of fighting the F1 red.
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    # Contact shadow under the plinth.
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.ellipse([cx - W * 0.42, base_bot - H * 0.02,
+                cx + W * 0.42, base_bot + H * 0.05], fill=(0, 0, 0, 120))
+    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(radius=2 * SS)))
+
+    img.alpha_composite(_metal_fill((W, H), mask, palette, SS))
+
+    draw = ImageDraw.Draw(img)
+    # Rim light along the left edge sells the roundness.
+    rim = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    rd = ImageDraw.Draw(rim)
+    rd.line([(cx - W * 0.27, H * 0.18), (cx - W * 0.20, H * 0.48)],
+            fill=gold_hi, width=max(1, SS))
+    img.alpha_composite(rim.filter(ImageFilter.GaussianBlur(radius=SS)))
+
+    # Engraving on the plinth.
     if H_out >= 36:
         try:
-            f1_font = ImageFont.truetype("arialbd.ttf", max(7 * SS, int(H * 0.11)))
+            f1_font = ImageFont.truetype("arialbd.ttf",
+                                          max(7 * SS, int(H * 0.10)))
         except (OSError, IOError):
             try:
                 f1_font = ImageFont.load_default()
@@ -460,17 +547,14 @@ def _make_trophy_image(height: int = 60, tier: str = "gold"):
             text = base_label
             try:
                 bbox = draw.textbbox((0, 0), text, font=f1_font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                tx = cx - tw / 2 - bbox[0]
-                ty = base_top + ((base_bot - base_top) - th) / 2 - bbox[1]
+                tw_, th_ = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                tx = cx - tw_ / 2 - bbox[0]
+                ty = base_top + ((base_bot - base_top) - th_) / 2 - bbox[1]
             except Exception:
-                tw, th = f1_font.getsize(text) if hasattr(f1_font, "getsize") else (10 * SS, 10 * SS)
-                tx = cx - tw / 2
-                ty = base_top + ((base_bot - base_top) - th) / 2
+                tx, ty = cx - 5 * SS, base_top
             engrave = F1_RED_RGB + (255,) if tier == "gold" else gold_edge
             draw.text((tx, ty), text, font=f1_font, fill=engrave)
 
-    # Down-sample with LANCZOS for smooth, anti-aliased edges.
     img = img.resize((W_out, H_out), Image.LANCZOS)
 
     _TROPHY_CACHE[cache_key] = img
@@ -7101,7 +7185,9 @@ class ApexAI:
                             image=tk_laurel, anchor="center", tags=(PT,),
                         )
 
-                trophy_img = _make_trophy_image(trophy_h, tier=tier)
+                trophy_img = _make_trophy_image(
+                    trophy_h, tier=tier,
+                    profile=_trophy_profile_for(self._viz_circuit))
                 if trophy_img is not None:
                     tk_trophy = ImageTk.PhotoImage(trophy_img)
                     self._tk_images.append(tk_trophy)
