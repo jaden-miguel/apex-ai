@@ -5689,7 +5689,8 @@ class ApexAI:
         return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
 
 
-    def _render_track_ribbon(self, cw, ch, track, hw, tw, kerb_idx):
+    def _render_track_ribbon(self, cw, ch, track, hw, tw, kerb_idx,
+                             mom_zones=()):
         """Draw the track surface, borders and kerbs as one anti-aliased image.
 
         Returns a PhotoImage sized to the canvas, or None without Pillow.
@@ -5782,6 +5783,42 @@ class ApexAI:
                      (track[j][1] + my * hw * side) * s)
                 d.line([a, b], fill=colour, width=max(1, int(kerb_w * s)))
 
+        # ── MOM zones ──
+        # Painted onto the asphalt as a translucent band with a brighter
+        # inner stripe, rather than the dashed green centreline this used
+        # to be.  A dash pattern over a smooth ribbon reads as a defect;
+        # a surface tint reads as a marked-out zone, which is what it is.
+        for st, ln in mom_zones or ():
+            seg = [loop[(st + j) % len(track)] for j in range(ln)]
+            if len(seg) < 2:
+                continue
+            d.line(seg, fill=(46, 216, 122, 46),
+                   width=max(1, int(tw * 0.92 * s)), joint="curve")
+            d.line(seg, fill=(46, 216, 122, 150),
+                   width=max(1, int(tw * 0.10 * s)), joint="curve")
+
+        # ── Start / finish chequer ──
+        # Two rows of alternating squares laid across the full track width,
+        # which is what the line actually looks like from above and reads
+        # instantly; the previous dashed white stroke did not.
+        nx0, ny0 = self._track_normal(track, 0)
+        ax, ay = -ny0, nx0                      # along the racing direction
+        cols = 8
+        cell = (hw * 2) / cols
+        ox, oy = track[0]
+        for row in range(2):
+            for col in range(cols):
+                across = -hw + col * cell
+                along = (row - 1) * cell
+                quad = []
+                for da, dc in ((0, 0), (0, cell), (cell, cell), (cell, 0)):
+                    quad.append((
+                        (ox + nx0 * (across + dc) + ax * (along + da)) * s,
+                        (oy + ny0 * (across + dc) + ay * (along + da)) * s))
+                light = (row + col) % 2 == 0
+                d.polygon(quad, fill=(238, 238, 242, 255) if light
+                                else (26, 26, 32, 255))
+
         # ── Tyre barriers ──
         # A wall of stacked tyres at the far edge of each run-off.  Drawn as
         # a row of individual dark discs with a lighter rim rather than one
@@ -5809,6 +5846,51 @@ class ApexAI:
                           width=max(1, int(0.5 * s)))
 
         return img.resize((int(cw), int(ch)), Image.BOX)
+
+    def _draw_corner_numbers(self, canvas, track, hw, curvatures, curv_top):
+        """Number the significant corners, the way a circuit map does.
+
+        The high-curvature points come in contiguous runs (one physical
+        corner spans several interpolation steps), so they are clustered
+        first and one label is emitted per cluster.  Numbering starts from
+        the point after start/finish and follows the racing direction, so
+        it matches how the corners are actually referred to.
+        """
+        num = len(track)
+        hot = [i for i, c in enumerate(curvatures) if c >= curv_top]
+        if not hot:
+            return
+        hot_set = set(hot)
+
+        # Group into corners: walk from start/finish so numbering begins in
+        # the right place even when a corner straddles the seam.
+        clusters, current = [], []
+        for off in range(num + 1):
+            i = off % num
+            if off < num and i in hot_set:
+                current.append(i)
+            elif current:
+                clusters.append(current)
+                current = []
+        if not clusters:
+            return
+
+        for n, cluster in enumerate(clusters, start=1):
+            mid = cluster[len(cluster) // 2]
+            nx, ny = self._track_normal(track, mid)
+            # Push the label to the inside of the corner: the outside is
+            # already occupied by run-off and barriers.
+            side = -1
+            for idx, sd in self._corner_outsides(track):
+                if idx == mid:
+                    side = -sd
+                    break
+            lx = track[mid][0] + nx * (hw + 13) * side
+            ly = track[mid][1] + ny * (hw + 13) * side
+            canvas.create_oval(lx - 7, ly - 7, lx + 7, ly + 7,
+                               fill="#101018", outline="#3d3d44")
+            canvas.create_text(lx, ly, text=str(n),
+                               font=(self.MONO, 7, "bold"), fill=GRAY)
 
     @staticmethod
     def _corner_outsides(track, step=5, keep=0.30):
@@ -6735,71 +6817,9 @@ class ApexAI:
         curv_sorted = sorted(curvatures, reverse=True)
         curv_top = curv_sorted[min(30, num - 1)]
 
-        # ── Track surface, borders and kerbs ──
-        # Drawn into one supersampled PIL image rather than as Tk canvas
-        # polygons.  Tk has no anti-aliasing, so a 200-vertex ribbon at this
-        # width shows a visible staircase on every curve; rendering at 3x
-        # and downsampling gives clean edges, a soft outer glow the canvas
-        # cannot express at all, and alternating red/white kerbs instead of
-        # plain red dots.  It also collapses ~400 canvas items into a single
-        # image, which is what makes the 60 fps loop below affordable.
-        kerb_idx = [i for i, c in enumerate(curvatures) if c >= curv_top]
-        ribbon = self._render_track_ribbon(cw, ch, track, hw, tw, kerb_idx)
-        backdrop = getattr(self, "_viz_backdrop", None)
-        if ribbon is not None and backdrop is not None:
-            # Sky, vignette, grass, skyline and circuit all flattened into
-            # one *opaque* image, lowered beneath the scenery.  Opaque
-            # matters: Tk then has no alpha to blend when a car's dirty rect
-            # overlaps it, which is the difference between ~7 fps and a
-            # smooth 60.  The trees drawn above it never overlap the track,
-            # so nothing is lost by putting the circuit into the same layer.
-            backdrop.alpha_composite(ribbon)
-            flat_bg = ImageTk.PhotoImage(backdrop.convert("RGB"))
-            self._viz_ribbon_tk = flat_bg
-            self._tk_images.append(flat_bg)
-            bg_id = canvas.create_image(0, 0, image=flat_bg, anchor="nw")
-            canvas.tag_lower(bg_id)
-            self._viz_backdrop = None
-        elif ribbon is not None:
-            photo = ImageTk.PhotoImage(ribbon)
-            self._viz_ribbon_tk = photo
-            self._tk_images.append(photo)
-            canvas.create_image(0, 0, image=photo, anchor="nw")
-        else:
-            # No Pillow: fall back to the original flat canvas polygons.
-            flat = []
-            for p in track:
-                flat.extend(p)
-            canvas.create_polygon(flat, outline="#16161e", fill="",
-                                  width=tw + 4)
-            canvas.create_polygon(flat, outline="#111119", fill="", width=tw)
-            for side_sign in (1, -1):
-                border = []
-                for i in range(num):
-                    nx, ny = self._track_normal(track, i)
-                    border.extend([track[i][0] + nx * hw * side_sign,
-                                   track[i][1] + ny * hw * side_sign])
-                canvas.create_line(border, fill="#2a2a38", width=1.5)
-            for i in kerb_idx:
-                if i % 6:
-                    continue
-                nx, ny = self._track_normal(track, i)
-                for ss in (1, -1):
-                    kx = track[i][0] + nx * hw * ss
-                    ky = track[i][1] + ny * hw * ss
-                    canvas.create_oval(kx - 2, ky - 2, kx + 2, ky + 2,
-                                       fill=RED, outline="")
-
-        # ── Start / finish ──
-        sf = track[0]
-        nx, ny = self._track_normal(track, 0)
-        canvas.create_line(sf[0] + nx * hw, sf[1] + ny * hw,
-                           sf[0] - nx * hw, sf[1] - ny * hw,
-                           fill=WHITE, width=3, dash=(4, 4))
-        canvas.create_text(sf[0] + nx * (hw + 16), sf[1] + ny * (hw + 16),
-                           text="START / FINISH", font=("Helvetica Neue", 7, "bold"),
-                           fill=MUTED)
-
+        # MOM detection runs before the ribbon is rasterised so the
+        # zones can be painted into the same image as the asphalt
+        # rather than laid over it as a dashed Tk line.
         # ── MOM zones, find the two longest straight stretches ──
         # Threshold: a point is "straight" if its curvature is below
         # the 55th percentile.  The previous median threshold
@@ -6867,6 +6887,76 @@ class ApexAI:
             if len(chosen) >= 2:
                 break
 
+
+        # ── Track surface, borders and kerbs ──
+        # Drawn into one supersampled PIL image rather than as Tk canvas
+        # polygons.  Tk has no anti-aliasing, so a 200-vertex ribbon at this
+        # width shows a visible staircase on every curve; rendering at 3x
+        # and downsampling gives clean edges, a soft outer glow the canvas
+        # cannot express at all, and alternating red/white kerbs instead of
+        # plain red dots.  It also collapses ~400 canvas items into a single
+        # image, which is what makes the 60 fps loop below affordable.
+        kerb_idx = [i for i, c in enumerate(curvatures) if c >= curv_top]
+        mom_zones = [(st, ln) for st, ln in runs_clean
+                     if (st + ln // 2) % num in set(chosen)]
+        ribbon = self._render_track_ribbon(cw, ch, track, hw, tw, kerb_idx,
+                                           mom_zones)
+        backdrop = getattr(self, "_viz_backdrop", None)
+        if ribbon is not None and backdrop is not None:
+            # Sky, vignette, grass, skyline and circuit all flattened into
+            # one *opaque* image, lowered beneath the scenery.  Opaque
+            # matters: Tk then has no alpha to blend when a car's dirty rect
+            # overlaps it, which is the difference between ~7 fps and a
+            # smooth 60.  The trees drawn above it never overlap the track,
+            # so nothing is lost by putting the circuit into the same layer.
+            backdrop.alpha_composite(ribbon)
+            flat_bg = ImageTk.PhotoImage(backdrop.convert("RGB"))
+            self._viz_ribbon_tk = flat_bg
+            self._tk_images.append(flat_bg)
+            bg_id = canvas.create_image(0, 0, image=flat_bg, anchor="nw")
+            canvas.tag_lower(bg_id)
+            self._viz_backdrop = None
+        elif ribbon is not None:
+            photo = ImageTk.PhotoImage(ribbon)
+            self._viz_ribbon_tk = photo
+            self._tk_images.append(photo)
+            canvas.create_image(0, 0, image=photo, anchor="nw")
+        else:
+            # No Pillow: fall back to the original flat canvas polygons.
+            flat = []
+            for p in track:
+                flat.extend(p)
+            canvas.create_polygon(flat, outline="#16161e", fill="",
+                                  width=tw + 4)
+            canvas.create_polygon(flat, outline="#111119", fill="", width=tw)
+            for side_sign in (1, -1):
+                border = []
+                for i in range(num):
+                    nx, ny = self._track_normal(track, i)
+                    border.extend([track[i][0] + nx * hw * side_sign,
+                                   track[i][1] + ny * hw * side_sign])
+                canvas.create_line(border, fill="#2a2a38", width=1.5)
+            for i in kerb_idx:
+                if i % 6:
+                    continue
+                nx, ny = self._track_normal(track, i)
+                for ss in (1, -1):
+                    kx = track[i][0] + nx * hw * ss
+                    ky = track[i][1] + ny * hw * ss
+                    canvas.create_oval(kx - 2, ky - 2, kx + 2, ky + 2,
+                                       fill=RED, outline="")
+
+        # ── Start / finish ──
+        self._draw_corner_numbers(canvas, track, hw, curvatures, curv_top)
+
+        # The line itself is chequered into the ribbon image; only the
+        # caption is a canvas item.
+        sf = track[0]
+        nx, ny = self._track_normal(track, 0)
+        canvas.create_text(sf[0] + nx * (hw + 16), sf[1] + ny * (hw + 16),
+                           text="START / FINISH", font=("Helvetica Neue", 7, "bold"),
+                           fill=MUTED)
+
         # Render whichever ones we got (1 or 2).
         chosen_set = set(chosen)
         for s, l in runs_clean:
@@ -6874,11 +6964,7 @@ class ApexAI:
             if mid not in chosen_set:
                 continue
             chosen_set.discard(mid)
-            zone_flat = []
-            for j in range(l):
-                zone_flat.extend(track[(s + j) % num])
-            if len(zone_flat) >= 4:
-                canvas.create_line(zone_flat, fill=GREEN, width=3, dash=(8, 4))
+            # The zone band is baked into the ribbon; this only labels it.
             mnx, mny = self._normal_at(float(mid))
             mp = self._pos_at(float(mid))
             canvas.create_text(mp[0] + mnx * (hw + 16),

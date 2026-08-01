@@ -122,8 +122,11 @@ two lap times; see the alignment notes below.*
     every corner (from signed curvature, so it lands where a car running
     wide would actually go), backed by staggered rows of tyre barriers.
     Grandstands carry per-tier crowd speckle and a roof lip instead of
-    being four flat grey bands. All of it bakes into the static backdrop,
-    so the detail costs nothing per frame.
+    being four flat grey bands. Start/finish is a real chequer laid
+    across the track, the corners are numbered from start/finish in the
+    racing direction, and MOM zones are painted onto the asphalt as a
+    translucent band rather than a dashed line over it. All of it bakes
+    into the static backdrop, so the detail costs nothing per frame.
   - **Singleton enforcement**: launching `app.py` while another
     instance is open kills the prior PID (with `SIGKILL` fallback) and
     sweeps the OS process list so stale instances from terminals or

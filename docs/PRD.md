@@ -194,7 +194,11 @@ need to follow the race.
     BOX, the blurred grass verge is built at half resolution, and the
     soft glow strokes use half the point density.
 - **F3.2.** **MOM zones** highlighted on the two longest detected
-  straights (cross-product curvature analysis with progressive
+  straights, painted onto the asphalt as a translucent band with a
+  brighter inner stripe. Detection therefore runs *before* the ribbon is
+  rasterised, so the zone goes into the same image as the surface; the
+  previous dashed green centreline read as a rendering defect once the
+  track around it was smooth. (cross-product curvature analysis with progressive
   separation fallback so single-straight tracks like Imola still get a
   zone).
 - **F3.3.** **Per-circuit ambient theming**:
@@ -226,6 +230,14 @@ need to follow the race.
     because the repetition is what makes them legible at map scale.
   - **Grandstands** with per-tier crowd speckle in four warm tones and a
     roof lip, instead of four flat grey polygons.
+  - **Chequered start/finish**: two rows of alternating squares across
+    the full track width, which is what the line looks like from above.
+    It replaced a dashed white stroke that read as nothing in particular.
+  - **Numbered corners.** High-curvature points arrive as contiguous
+    runs (one physical corner spans several interpolation steps), so they
+    are clustered and one number is emitted per corner, counted from
+    start/finish in the racing direction. Labels sit on the *inside* of
+    the corner because the outside is occupied by run-off and barriers.
   - **Three canopy variants** per tree species, selected from the
     placement index, so a treeline is a wood rather than one stencil. The ridge
   was previously anchored so its peaks were clipped off the top of the
