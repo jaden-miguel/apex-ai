@@ -3153,10 +3153,19 @@ class ApexAI:
         for rb in self._race_btns:
             rb._sel_bg = BG_SURFACE
             rb.configure(bg=BG_SURFACE)
-            rb._lbl.configure(bg=BG_SURFACE, fg=GRAY)
+            rb._lbl.configure(bg=BG_SURFACE, fg=GRAY,
+                              text=f"  {rb._race[1]}")
         btn._sel_bg = GOLD_DIM
         btn.configure(bg=GOLD_DIM)
-        btn._lbl.configure(bg=GOLD_DIM, fg=GOLD)
+        # Mark the row itself as loading.  Selecting it turned it gold but
+        # said nothing about the wait, so a slow race looked like a dead
+        # click; the marker is cleared by _populate_clips / _radio_error.
+        btn._lbl.configure(bg=GOLD_DIM, fg=GOLD,
+                           text=f"  {race_name}   ·  loading")
+        self._radio_loading_btn = btn
+        # Paint the selection before the worker starts so the feedback is
+        # immediate rather than arriving with the first status update.
+        self.root.update_idletasks()
 
         self._stop_radio()
         for w in self._clip_inner.winfo_children():
@@ -3168,6 +3177,13 @@ class ApexAI:
         self._radio_loading_lbl.pack()
         self._clip_count_lbl.configure(text="loading...")
 
+        # Every race click gets a token.  A slow load for a race the user
+        # has already navigated away from must not paint over the one they
+        # are now looking at, and its prefetch must stop competing for
+        # bandwidth with the current race.
+        self._radio_gen = getattr(self, "_radio_gen", 0) + 1
+        gen = self._radio_gen
+
         def fetch():
             try:
                 # Prefer the direct FIA-archive loader: it merges static +
@@ -3175,10 +3191,18 @@ class ApexAI:
                 # silent) so the UI can show coverage honestly.
                 if radio_fia is not None:
                     def _prog(stage, done, total):
+                        if gen != self._radio_gen:
+                            return
                         self.root.after(0, lambda: self._set_status(
                             f"{stage}: {done}/{total}"
                         ))
-                    session = radio_fia.load(yr, race_name, "R", progress=_prog)
+                    # Metadata only.  Downloading 40-80 mp3s up front was
+                    # the whole of the wait: the clip list cannot appear
+                    # until load() returns, and load() used to block on
+                    # every file.  Audio is fetched behind the list.
+                    session = radio_fia.load(yr, race_name, "R",
+                                             progress=_prog,
+                                             download_audio=False)
                 elif HAS_F1RADIO:
                     session = f1radio.load(yr, race_name, "R")
                 else:
@@ -3192,6 +3216,8 @@ class ApexAI:
                 drivers_all = list(getattr(session, "drivers", []) or [])
                 stints_by_drv = dict(getattr(session, "stints_by_drv", {}) or {})
                 laps_by_drv = dict(getattr(session, "laps_by_drv", {}) or {})
+                if gen != self._radio_gen:
+                    return
                 self.root.after(
                     0,
                     lambda: self._populate_clips(
@@ -3203,12 +3229,50 @@ class ApexAI:
                         laps_by_drv=laps_by_drv,
                     ),
                 )
+                # List is on screen; now warm the audio cache behind it so
+                # the first play of any clip is instant.
+                self._prefetch_radio_audio(clips, gen)
             except Exception as e:
-                self.root.after(0, lambda: self._radio_error(str(e)))
+                if gen == self._radio_gen:
+                    self.root.after(0, lambda: self._radio_error(str(e)))
 
         threading.Thread(target=fetch, daemon=True).start()
 
+    def _prefetch_radio_audio(self, clips, gen):
+        """Fill the audio cache for `clips` without blocking the list.
+
+        Runs on the fetch thread that already produced the metadata.  It
+        checks the race token on every file, so switching races abandons
+        the old download instead of finishing it.
+        """
+        if radio_fia is None or not hasattr(radio_fia, "prefetch"):
+            return
+
+        def _report(done, total):
+            if gen != self._radio_gen:
+                return
+            msg = (f"Caching radio audio: {done}/{total}"
+                   if done < total else "Radio audio cached")
+            self.root.after(0, lambda: self._set_status(msg))
+
+        try:
+            radio_fia.prefetch(clips, progress=_report,
+                               should_stop=lambda: gen != self._radio_gen)
+        except Exception:
+            pass
+
+    def _clear_radio_loading_mark(self):
+        btn = getattr(self, "_radio_loading_btn", None)
+        if btn is None:
+            return
+        try:
+            btn._lbl.configure(text=f"  {btn._race[1]}")
+        except tk.TclError:
+            pass
+        self._radio_loading_btn = None
+
     def _radio_error(self, msg):
+        self._clear_radio_loading_mark()
         for w in self._clip_inner.winfo_children():
             w.destroy()
         tk.Label(self._clip_inner, text=f"Error: {msg}",
@@ -3220,6 +3284,7 @@ class ApexAI:
                         session_label="", drivers_silent=None,
                         drivers_heard=None, drivers_all=None,
                         stints_by_drv=None, laps_by_drv=None):
+        self._clear_radio_loading_mark()
         # Compute lap + event metadata for every clip, then sort the clips
         # chronologically (by their broadcast timestamp) so the visible order
         # actually mirrors how the race unfolded.
@@ -3575,8 +3640,17 @@ class ApexAI:
 
         path = clip.local_path
         if not path or not os.path.exists(path):
-            self._set_status("Audio file not available")
-            return
+            # The list renders before the audio cache is warm, so a clip
+            # clicked early may not be on disk yet.  Fetch just this one:
+            # it is a single file, so the wait is a moment rather than the
+            # whole race.
+            if radio_fia is not None and hasattr(radio_fia, "ensure_local"):
+                self._set_status("Fetching clip audio...")
+                self.root.update_idletasks()
+                path = radio_fia.ensure_local(clip)
+            if not path or not os.path.exists(path):
+                self._set_status("Audio file not available")
+                return
 
         self._radio_playing = idx
         driver_text = clip.driver_name or clip.driver or "Unknown"

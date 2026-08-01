@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import re
 import sys
 import threading
@@ -415,6 +416,122 @@ def _download_audio(year: int, race_slug: str, archive_path: str,
         t.join()
 
 
+# Bump when the shape of anything pickled below changes, so a stale cache
+# is discarded rather than unpickled into the wrong dataclass.
+_META_CACHE_VERSION = "rmeta2"
+
+
+def _meta_cache_path(year: int, race: str, session_type: str) -> Path:
+    d = _cache_dir() / "_meta"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{_META_CACHE_VERSION}_{year}_{_slug(race)}_{session_type}.pkl"
+
+
+def _read_meta_cache(year: int, race: str, session_type: str):
+    """Return a cached _Session, or None.
+
+    Only completed sessions are cached, so there is no staleness window to
+    manage: if the file is there it is as good as a fresh fetch.  Any read
+    error just falls through to the network path.
+    """
+    try:
+        path = _meta_cache_path(year, race, session_type)
+        if not path.exists():
+            return None
+        with open(path, "rb") as fh:
+            sess = pickle.load(fh)
+        if not getattr(sess, "clips", None):
+            return None
+        # Re-point audio paths at whatever is actually on disk now: the
+        # cache may outlive a cleared audio directory.
+        for c in sess.clips:
+            lp = getattr(c, "local_path", None)
+            if lp and not os.path.exists(lp):
+                c.local_path = None
+        return sess
+    except Exception:
+        return None
+
+
+def _write_meta_cache(year: int, race: str, session_type: str, session) -> None:
+    try:
+        with open(_meta_cache_path(year, race, session_type), "wb") as fh:
+            pickle.dump(session, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
+
+
+def ensure_local(clip) -> str | None:
+    """Fetch one clip's audio if it is not cached yet; return its path.
+
+    Used both by the play button (a single file, so the wait is short) and
+    by the background prefetch the UI starts after rendering the list.
+    """
+    path = getattr(clip, "local_path", None)
+    if path and os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    target = getattr(clip, "pending_path", None) or path
+    url = getattr(clip, "recording_url", None)
+    if not target or not url:
+        return None
+    try:
+        p = Path(target)
+        if p.exists() and p.stat().st_size > 0:
+            clip.local_path = str(p)
+            return clip.local_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(_http_get(url, timeout=30))
+        clip.local_path = str(p)
+        return clip.local_path
+    except Exception:
+        return None
+
+
+def prefetch(clips, workers: int = 8, progress=None, should_stop=None) -> None:
+    """Warm the audio cache for a whole race in the background.
+
+    `should_stop` lets the UI abandon the prefetch when the user switches
+    to a different race, so a slow download for a race nobody is looking
+    at any more cannot hold up the one they are.
+    """
+    pending = [c for c in clips
+               if not (getattr(c, "local_path", None)
+                       and os.path.exists(c.local_path))]
+    total = len(pending)
+    if not total:
+        if progress:
+            progress(0, 0)
+        return
+    sem = threading.Semaphore(max(1, workers))
+    done = [0]
+    lock = threading.Lock()
+    threads = []
+
+    def _one(clip):
+        try:
+            if not (should_stop and should_stop()):
+                ensure_local(clip)
+        finally:
+            sem.release()
+            with lock:
+                done[0] += 1
+                if progress:
+                    try:
+                        progress(done[0], total)
+                    except Exception:
+                        pass
+
+    for c in pending:
+        if should_stop and should_stop():
+            break
+        sem.acquire()
+        t = threading.Thread(target=_one, args=(c,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+
 # -- Public shaped objects ---------------------------------------------------
 
 @dataclass
@@ -438,6 +555,9 @@ class _Clip:
     date: str            # ISO-8601 UTC
     lap: int | None = None
     context: _Ctx = field(default_factory=_Ctx)
+    # Where the mp3 will be cached once fetched.  Set even when the audio
+    # has not been downloaded yet, so `ensure_local` needs no extra state.
+    pending_path: str | None = None
 
 
 @dataclass
@@ -513,9 +633,29 @@ def annotate_clip_context(clip: _Clip, lap: int | None,
 
 
 def load(year: int, race: str, session_type: str = "R",
-         progress=None) -> _Session:
+         progress=None, download_audio: bool = True) -> _Session:
     """Drop-in alternative to f1radio.load that talks to the FIA archive
-    directly and merges OpenF1 metadata."""
+    directly and merges OpenF1 metadata.
+
+    `download_audio=False` returns as soon as the clip *metadata* is known
+    and leaves every clip's `local_path` unset.  A race has 40-80 captures
+    and fetching them all is by far the slowest part of the load, so the
+    UI asks for metadata first, renders the list, and pulls audio in the
+    background (or on demand at play time) via `ensure_local`.
+    """
+
+    # A completed session's radio metadata is immutable, so the whole
+    # assembled result is cached on disk.  Coming back to a race you have
+    # already opened is then a single file read instead of six network
+    # round trips -- which is the case that felt worst, since flipping
+    # between races paid the full load every time.
+    cached = _read_meta_cache(year, race, session_type)
+    if cached is not None:
+        if progress:
+            progress("Loading cached session", 1, 1)
+        if download_audio:
+            prefetch(cached.clips)
+        return cached
 
     meta = _resolve_session_meta(year, race, session_type)
     archive_path = meta["path"]
@@ -525,43 +665,83 @@ def load(year: int, race: str, session_type: str = "R",
     if progress:
         progress("Fetching captures", 0, 1)
 
-    captures = _fetch_fia_captures(archive_path)
-    drivers_map = _fetch_drivers_map(session_key, archive_path)
-    event_log = _fetch_event_log(session_key)
+    # These five fetches are independent of one another and were being run
+    # one after the next, so the load cost their *sum* -- about 6 s of the
+    # 8 s warm load, and far worse cold.  Run them together and it costs
+    # the slowest one instead.
+    results: dict[str, object] = {}
+
+    def _task(name, fn):
+        def run():
+            try:
+                results[name] = fn()
+            except Exception:
+                results[name] = None
+        return run
+
+    jobs = [
+        threading.Thread(target=_task(
+            "captures", lambda: _fetch_fia_captures(archive_path)), daemon=True),
+        threading.Thread(target=_task(
+            "drivers", lambda: _fetch_drivers_map(session_key, archive_path)),
+            daemon=True),
+        threading.Thread(target=_task(
+            "events", lambda: _fetch_event_log(session_key)), daemon=True),
+        threading.Thread(target=_task(
+            "stints", lambda: _json_get(
+                f"{_OPENF1_BASE}/stints?session_key={session_key}")
+            if session_key else []), daemon=True),
+        threading.Thread(target=_task(
+            "laps", lambda: _json_get(
+                f"{_OPENF1_BASE}/laps?session_key={session_key}")
+            if session_key else []), daemon=True),
+    ]
+    for j in jobs:
+        j.start()
+    for j in jobs:
+        j.join()
+
+    captures = results.get("captures") or []
+    drivers_map = results.get("drivers") or {}
+    event_log = results.get("events") or []
 
     # Pre-index stints (compound, tyre age, stint number) and laps
     # (position per lap) by driver_number.  The UI matches stints/positions
     # to clips by lap *after* lap-mapping completes.
     stints_by_drv: dict[int, list[dict]] = {}
     laps_by_drv: dict[int, list[dict]] = {}
-    try:
-        if session_key:
-            for s in _json_get(
-                f"{_OPENF1_BASE}/stints?session_key={session_key}"
-            ):
-                num = s.get("driver_number")
-                if isinstance(num, int):
-                    stints_by_drv.setdefault(num, []).append(s)
-            for L in _json_get(
-                f"{_OPENF1_BASE}/laps?session_key={session_key}"
-            ):
-                num = L.get("driver_number")
-                if isinstance(num, int):
-                    laps_by_drv.setdefault(num, []).append(L)
-    except Exception:
-        pass
+    for st in (results.get("stints") or []):
+        num = st.get("driver_number")
+        if isinstance(num, int):
+            stints_by_drv.setdefault(num, []).append(st)
+    for L in (results.get("laps") or []):
+        num = L.get("driver_number")
+        if isinstance(num, int):
+            laps_by_drv.setdefault(num, []).append(L)
     # Sort stints by lap_start so binary-search-style matching works.
     for v in stints_by_drv.values():
         v.sort(key=lambda s: s.get("lap_start") or 0)
     for v in laps_by_drv.values():
         v.sort(key=lambda L: L.get("lap_number") or 0)
 
-    if progress:
-        progress("Downloading audio", 0, len(captures))
-    _download_audio(year, _slug(race_name), archive_path, captures,
-                    progress=lambda d, t: (
-                        progress and progress("Downloading audio", d, t)
-                    ))
+    if download_audio:
+        if progress:
+            progress("Downloading audio", 0, len(captures))
+        _download_audio(year, _slug(race_name), archive_path, captures,
+                        progress=lambda d, t: (
+                            progress and progress("Downloading audio", d, t)
+                        ))
+    else:
+        # Record where each file *will* land so `ensure_local` can find a
+        # cache hit without re-deriving the path.
+        out_dir = _cache_dir() / f"{year}_{_slug(race_name)}"
+        for cap in captures:
+            rel = cap.get("Path") or ""
+            if not rel:
+                continue
+            local = out_dir / rel.rsplit("/", 1)[-1]
+            cap["_local_path"] = str(local) if local.exists() else None
+            cap["_pending"] = str(local)
 
     clips: list[_Clip] = []
     for cap in captures:
@@ -581,6 +761,7 @@ def load(year: int, race: str, session_type: str = "R",
             driver_number=int(num) if num.isdigit() else None,
             team=drv_info.get("team") or "",
             local_path=cap.get("_local_path"),
+            pending_path=cap.get("_pending") or cap.get("_local_path"),
             recording_url=f"{_FIA_BASE}/{archive_path}/{rel_path}",
             date=date,
             context=ctx,
@@ -600,7 +781,7 @@ def load(year: int, race: str, session_type: str = "R",
     ]
     drivers_all = [drivers_map[n].get("abbr") or n for n in on_grid]
 
-    return _Session(
+    session = _Session(
         year=year,
         race=race_name,
         session_type=session_type,
@@ -613,6 +794,8 @@ def load(year: int, race: str, session_type: str = "R",
         stints_by_drv=stints_by_drv,
         laps_by_drv=laps_by_drv,
     )
+    _write_meta_cache(year, race, session_type, session)
+    return session
 
 
 if __name__ == "__main__":
